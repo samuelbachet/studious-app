@@ -4,6 +4,7 @@ export const STORAGE = {
   timer: '@studious/timer',
   custom: '@studious/custom-timer',
   history: '@studious/session-history',
+  aimBoard: 'studious.aimBoardState',
   theme: 'studious.themeMode',
   legacyTheme: 'studyApp.themeMode',
   developer: 'studious.developerMode',

@@ -9,6 +9,7 @@ test('reset is limited to the audited Studious-owned keys', () => {
     '@studious/timer',
     '@studious/custom-timer',
     '@studious/session-history',
+    'studious.aimBoardState',
     'studious.themeMode',
     'studyApp.themeMode',
     'studious.developerMode',
