@@ -1,4 +1,4 @@
-import { Feather } from '@expo/vector-icons';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
@@ -73,16 +73,15 @@ function EditPencilIcon({ color }: { color: string }) {
   return <Feather name="edit-3" size={17} color={color} accessible={false} />;
 }
 
-function FocusIcon({ size = 24, color }: { size?: number; color: string }) {
-  const petal = { width: size * 0.27, height: size * 0.58, borderRadius: size * 0.2, borderWidth: Math.max(1.3, size * 0.07), borderColor: color, position: 'absolute' as const };
-  return <View accessible accessibilityLabel="Focus" style={{ width: size, height: size * 0.82, alignItems: 'center', justifyContent: 'flex-end' }}><View style={[petal, { bottom: size * 0.17, transform: [{ scaleY: 0.92 }] }]} /><View style={[petal, { bottom: size * 0.16, left: size * 0.29, transform: [{ rotate: '-27deg' }, { scaleY: 0.82 }] }]} /><View style={[petal, { bottom: size * 0.16, right: size * 0.29, transform: [{ rotate: '27deg' }, { scaleY: 0.82 }] }]} /><View style={[petal, { bottom: size * 0.1, left: size * 0.08, transform: [{ rotate: '-57deg' }, { scaleY: 0.68 }] }]} /><View style={[petal, { bottom: size * 0.1, right: size * 0.08, transform: [{ rotate: '57deg' }, { scaleY: 0.68 }] }]} /><View style={{ width: size * 0.7, height: size * 0.12, borderTopWidth: Math.max(1.3, size * 0.07), borderColor: color, borderRadius: size * 0.3, marginBottom: size * 0.05 }} /></View>;
+function MindAuraIcon({ size = 24, color }: { size?: number; color: string }) {
+  return <View accessible={false} style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center', borderWidth: Math.max(1.3, size * 0.06), borderColor: color, borderRadius: size / 2 }}><MaterialCommunityIcons name="head-outline" size={size * 0.76} color={color} accessible={false} /></View>;
 }
 
 function BottomNavigation({ screen, onChange }: { screen: PrimaryScreen; onChange: (screen: PrimaryScreen) => void }) {
   const { theme: colors, styles } = useAppTheme();
   const { bottom } = useSafeAreaInsets();
-  const items: { label: PrimaryScreen; icon?: keyof typeof Feather.glyphMap }[] = [{ label: 'Home', icon: 'home' }, { label: 'Plan', icon: 'clipboard' }, { label: 'Focus' }, { label: 'Settings', icon: 'settings' }];
-  return <View style={[styles.navBar, { height: NAV_BAR_HEIGHT + bottom, paddingBottom: bottom }]}>{items.map((item) => { const active = item.label === screen; const iconColor = active ? colors.accent : colors.inactive; return <PressableScale key={item.label} onPress={() => onChange(item.label)} accessibilityLabel={`Open ${item.label}`} style={styles.navItem}>{item.label === 'Focus' ? <FocusIcon size={24} color={iconColor} /> : <Feather name={item.icon!} size={21} color={iconColor} />}<Text style={[styles.navLabel, active && styles.navLabelActive]}>{item.label}</Text></PressableScale>; })}</View>;
+  const items: { screen: PrimaryScreen; label: string; icon?: keyof typeof Feather.glyphMap }[] = [{ screen: 'Home', label: 'Aim', icon: 'target' }, { screen: 'Plan', label: 'Steady' }, { screen: 'Focus', label: 'Focus' }, { screen: 'Settings', label: 'Settings', icon: 'settings' }];
+  return <View style={[styles.navBar, { height: NAV_BAR_HEIGHT + bottom, paddingBottom: bottom }]}>{items.map((item) => { const active = item.screen === screen; const iconColor = active ? colors.accent : colors.inactive; return <PressableScale key={item.screen} onPress={() => onChange(item.screen)} accessibilityLabel={`Open ${item.label}`} style={styles.navItem}>{item.screen === 'Plan' ? <MaterialCommunityIcons name="meditation" size={24} color={iconColor} accessible={false} /> : item.screen === 'Focus' ? <MindAuraIcon size={24} color={iconColor} /> : <Feather name={item.icon!} size={21} color={iconColor} />}<Text style={[styles.navLabel, active && styles.navLabelActive]}>{item.label}</Text></PressableScale>; })}</View>;
 }
 
 function CustomTimerModal({ visible, initialValue, onClose, onSave }: { visible: boolean; initialValue: number; onClose: () => void; onSave: (value: number) => void }) {
