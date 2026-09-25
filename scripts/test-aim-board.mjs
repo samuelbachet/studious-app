@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  addAim, addGroup, archiveSelected, DEFAULT_GROUP_TITLE, deleteAim, deleteGroup, deleteSelected, emptyAimBoard, localDateKey,
-  renameAim, renameGroup, reorderAim, restoreAimBoard, retainRecentArchive, rollAimBoard, unarchiveSelected,
-  updateAimNote, updateArchivedNote,
+  addAim, addGroup, addSeptember23ArchivePreview, addSeptember23PreviewGroup, archiveSelected, completeArchivedSelected, completeSelected, DEFAULT_GROUP_TITLE, deleteAim, deleteArchivedSelected, deleteEmptyGroups, deleteGroup, deleteSelected, emptyAimBoard, localDateKey,
+  prioritizeOldGroups, renameAim, renameGroup, reorderAim, restoreAimBoard, retainRecentArchive, rollAimBoard, unarchiveSelected,
+  uncompleteArchivedSelected, uncompleteSelected, updateAimNote, updateArchivedNote,
 } from '../aimBoard.ts';
 
 const today = new Date(2026, 8, 24, 12);
@@ -15,7 +15,7 @@ function withAims(count, state = emptyAimBoard(today), groupId = state.active.gr
   return next;
 }
 
-test('fresh board has one empty default Aims group on the local date', () => {
+test('fresh empty board has one default Morning session group on the local date', () => {
   const board = emptyAimBoard(today);
   assert.equal(board.active.dateKey, '2026-09-24');
   assert.equal(board.active.groups.length, 1);
@@ -71,6 +71,45 @@ test('aim edits and notes persist, with 240-character note cap', () => {
   assert.equal(renameAim(noted, aimId, ' '), noted);
 });
 
+test('new aims can include a trimmed note within the existing note limit', () => {
+  const initial = emptyAimBoard(today);
+  const groupId = initial.active.groups[0].id;
+  const withNote = addAim(initial, 'Read Chapter 4', groupId, today, '  Key ideas to remember  ');
+  assert.equal(withNote.active.groups[0].aims[0].note, 'Key ideas to remember');
+  const longNote = addAim(initial, 'Read Chapter 5', groupId, today, 'n'.repeat(300));
+  assert.equal(longNote.active.groups[0].aims[0].note.length, 240);
+});
+
+test('selected aims can be marked complete without changing other aims', () => {
+  const initial = withAims(3);
+  const [, second, third] = initial.active.groups[0].aims;
+  const completed = completeSelected(initial, new Set([second.id, third.id]));
+  assert.deepEqual(completed.active.groups[0].aims.map((aim) => aim.completed), [false, true, true]);
+  assert.equal(completeSelected(completed, new Set([second.id])), completed);
+  assert.equal(completeSelected(initial, new Set()), initial);
+  assert.deepEqual(restoreAimBoard(JSON.stringify(completed), today).active.groups[0].aims.map((aim) => aim.completed), [false, true, true]);
+  const reopened = uncompleteSelected(completed, new Set([second.id]));
+  assert.deepEqual(reopened.active.groups[0].aims.map((aim) => aim.completed), [false, false, true]);
+  assert.equal(uncompleteSelected(reopened, new Set([second.id])), reopened);
+});
+
+test('completion state survives archive, daily roll, and unarchive', () => {
+  const initial = withAims(2);
+  const [done, unfinished] = initial.active.groups[0].aims;
+  const completed = completeSelected(initial, new Set([done.id]));
+  const archived = archiveSelected(completed, new Set([done.id, unfinished.id]), today);
+  assert.deepEqual(archived.archive[0].aims.map((aim) => aim.completed), [true, false]);
+  assert.deepEqual(rollAimBoard(completed, tomorrow).archive[0].aims.map((aim) => aim.completed), [true, false]);
+  const restored = unarchiveSelected(archived, new Set([done.id]), today);
+  assert.equal(restored.active.groups.flatMap((group) => group.aims).find((aim) => aim.id === done.id)?.completed, true);
+});
+
+test('aims saved before completion support default to incomplete', () => {
+  const legacy = JSON.parse(JSON.stringify(withAims(1)));
+  delete legacy.active.groups[0].aims[0].completed;
+  assert.equal(restoreAimBoard(JSON.stringify(legacy), today).active.groups[0].aims[0].completed, false);
+});
+
 test('aims reorder within their group without changing text, notes, or another group', () => {
   let board = withAims(3);
   board = addGroup(board, 'Research', today);
@@ -92,11 +131,48 @@ test('aims reorder within their group without changing text, notes, or another g
   assert.deepEqual(restored.active.groups[0].aims.map((aim) => aim.id), [root.aims[2].id, root.aims[0].id, root.aims[1].id]);
 });
 
-test('empty groups cannot produce archive records', () => {
+test('empty groups archive only when explicitly selected and can be restored', () => {
   const initial = addGroup(emptyAimBoard(today), 'Personal', today);
   assert.equal(archiveSelected(initial, new Set(['not-an-aim']), today), initial);
-  assert.equal(initial.archive.length, 0);
-  assert.equal(initial.active.groups.length, 2);
+  const personal = initial.active.groups[1];
+  const archived = archiveSelected(initial, new Set(), today, new Set([personal.id]));
+  assert.deepEqual(archived.active.groups.map((group) => group.id), [initial.active.groups[0].id]);
+  assert.equal(archived.archive[0].title, 'Personal');
+  assert.deepEqual(archived.archive[0].aims, []);
+  assert.equal(restoreAimBoard(JSON.stringify(archived), today).archive[0].id, archived.archive[0].id);
+  const restored = unarchiveSelected(archived, new Set(), today, new Set([archived.archive[0].id]));
+  assert.equal(restored.archive.length, 0);
+  assert.deepEqual(restored.active.groups.find((group) => group.title === 'Personal')?.aims, []);
+});
+
+test('empty default group can archive alone and restore as a separate old group', () => {
+  const initial = emptyAimBoard(today);
+  const previous = renameGroup(initial, initial.active.groups[0].id, 'University');
+  const source = previous.active.groups[0];
+  const archived = archiveSelected(previous, new Set(), today, new Set([source.id]));
+  assert.equal(archived.active.groups.length, 0);
+  assert.equal(restoreAimBoard(JSON.stringify(archived), today).active.groups.length, 0);
+  let current = emptyAimBoard(tomorrow);
+  current = addGroup(current, 'University', tomorrow);
+  const restored = unarchiveSelected({ ...current, archive: archived.archive }, new Set(), tomorrow, new Set([archived.archive[0].id]));
+  const oldGroup = restored.active.groups.find((group) => group.restoredFromDateKey === '2026-09-24');
+  assert.equal(oldGroup?.title, 'University');
+  assert.deepEqual(oldGroup?.aims, []);
+  assert.notEqual(oldGroup?.id, current.active.groups[1].id);
+  assert.equal(restored.archive.length, 0);
+});
+
+test('archived empty groups can be deleted alongside archived aims', () => {
+  let board = withAims(1);
+  board = addGroup(board, 'Personal', today);
+  const aimId = board.active.groups[0].aims[0].id;
+  const emptyId = board.active.groups[1].id;
+  const archived = archiveSelected(board, new Set([aimId]), today, new Set([emptyId]));
+  const emptyArchiveId = archived.archive.find((group) => group.aims.length === 0)?.id;
+  assert.ok(emptyArchiveId);
+  assert.equal(archived.archive.length, 2);
+  const deleted = deleteArchivedSelected(archived, new Set([aimId]), new Set([emptyArchiveId]));
+  assert.equal(deleted.archive.length, 0);
 });
 
 test('partial archive preserves title; default group stays when its last aim is archived', () => {
@@ -176,9 +252,15 @@ test('deleting an aim does not archive it; deleting a group removes its aims and
   assert.equal(deleteGroup(board, 'missing'), board);
   const initial = emptyAimBoard(today);
   const fresh = deleteGroup(initial, initial.active.groups[0].id);
-  assert.equal(fresh.active.groups.length, 1);
-  assert.equal(fresh.active.groups[0].title, 'Aims');
-  assert.notEqual(fresh.active.groups[0].id, initial.active.groups[0].id);
+  assert.deepEqual(fresh.active.groups, []);
+  assert.deepEqual(restoreAimBoard(JSON.stringify(fresh), today).active.groups, []);
+  assert.deepEqual(rollAimBoard(fresh, today).active.groups, []);
+  const addedAfterDelete = addGroup(fresh, 'Personal', today);
+  assert.equal(addedAfterDelete.active.groups[0].isDefault, true);
+  const selectedForDeletion = deleteEmptyGroups(initial, new Set([initial.active.groups[0].id]));
+  assert.deepEqual(selectedForDeletion.active.groups, []);
+  const populated = withAims(1);
+  assert.equal(deleteEmptyGroups(populated, new Set([populated.active.groups[0].id])), populated);
 });
 
 test('deleting selected aims keeps unselected aims and never creates archive records', () => {
@@ -223,7 +305,7 @@ test('selection may archive aims from several titles in one operation', () => {
   const archived = archiveSelected(board, selected, today);
   assert.equal(archived.active.groups.length, 1);
   assert.deepEqual(archived.active.groups[0].aims, []);
-  assert.deepEqual(new Set(archived.archive.map((group) => group.title)), new Set(['Aims', 'Research']));
+  assert.deepEqual(new Set(archived.archive.map((group) => group.title)), new Set([DEFAULT_GROUP_TITLE, 'Research']));
 });
 
 test('unarchiving one aim restores its note to the original active group and leaves the rest archived', () => {
@@ -239,6 +321,77 @@ test('unarchiving one aim restores its note to the original active group and lea
   assert.equal('archivedAt' in restored.active.groups[0].aims[0], false);
   assert.deepEqual(restored.archive[0].aims.map((aim) => aim.id), [root.aims[0].id, root.aims[2].id]);
   assert.equal(restoreAimBoard(JSON.stringify(restored), today).active.groups[0].aims[0].note, 'Edited in Archive');
+});
+
+test('older archived group restores separately with a date header and Old marker', () => {
+  let previousDay = emptyAimBoard(today);
+  previousDay = renameGroup(previousDay, previousDay.active.groups[0].id, 'University');
+  previousDay = addAim(previousDay, 'Read Chapter 4', previousDay.active.groups[0].id, today);
+  const rolled = rollAimBoard(previousDay, tomorrow);
+  const archivedAimId = rolled.archive[0].aims[0].id;
+
+  let currentDay = emptyAimBoard(tomorrow);
+  currentDay = addGroup(currentDay, 'University', tomorrow);
+  const currentGroup = currentDay.active.groups[1];
+  currentDay = addAim(currentDay, 'Attend lecture', currentGroup.id, tomorrow);
+  const restored = unarchiveSelected({ ...currentDay, archive: rolled.archive }, new Set([archivedAimId]), tomorrow);
+  const university = restored.active.groups.find((group) => group.id === currentGroup.id);
+  const oldUniversity = restored.active.groups.find((group) => group.restoredFromDateKey === '2026-09-24');
+
+  assert.ok(university);
+  assert.deepEqual(university.aims.map((aim) => aim.text), ['Attend lecture']);
+  assert.ok(oldUniversity);
+  assert.equal(oldUniversity.title, 'University');
+  assert.notEqual(oldUniversity.id, currentGroup.id);
+  assert.deepEqual(oldUniversity.aims.map((aim) => aim.text), ['Read Chapter 4']);
+  assert.equal(oldUniversity.restoredFromGroupId, rolled.archive[0].originalGroupId);
+  const displayedGroups = prioritizeOldGroups(restored.active.groups);
+  assert.equal(displayedGroups[0].id, oldUniversity.id);
+  assert.equal(displayedGroups.find((group) => group.isDefault)?.id, restored.active.groups.find((group) => group.isDefault)?.id);
+  const hydrated = restoreAimBoard(JSON.stringify(restored), tomorrow);
+  assert.equal(hydrated.active.groups.find((group) => group.id === oldUniversity.id)?.restoredFromDateKey, '2026-09-24');
+});
+
+test('September 23 preview is a persisted old group separate from a same-named current group', () => {
+  let board = addGroup(emptyAimBoard(today), 'University', today);
+  board = addAim(board, 'Attend lecture', board.active.groups[1].id, today);
+  const preview = addSeptember23PreviewGroup(board, today);
+  const currentGroup = preview.active.groups.find((group) => group.id === board.active.groups[1].id);
+  const oldGroup = preview.active.groups.find((group) => group.restoredFromDateKey === '2026-09-23');
+
+  assert.ok(currentGroup);
+  assert.deepEqual(currentGroup.aims.map((aim) => aim.text), ['Attend lecture']);
+  assert.ok(oldGroup);
+  assert.equal(oldGroup.title, 'University');
+  assert.notEqual(oldGroup.id, currentGroup.id);
+  assert.deepEqual(oldGroup.aims.map((aim) => aim.text), ['Read Chapter 4']);
+  assert.equal(oldGroup.aims[0].completed, false);
+  assert.equal(preview.archive.some((group) => group.aims.some((aim) => aim.text === 'Read Chapter 4')), false);
+  const hydrated = restoreAimBoard(JSON.stringify(preview), today);
+  assert.equal(hydrated.active.groups.find((group) => group.restoredFromDateKey === '2026-09-23')?.aims[0]?.text, 'Read Chapter 4');
+
+  const archivedAgain = archiveSelected(preview, new Set([oldGroup.aims[0].id]), today);
+  const archiveRecord = archivedAgain.archive.find((group) => group.aims.some((aim) => aim.text === 'Read Chapter 4'));
+  assert.equal(archiveRecord?.originalDateKey, '2026-09-23');
+  assert.equal(archiveRecord?.title, 'University');
+});
+
+test('September 23 preview appears in Archive and archived selection can complete or delete it', () => {
+  const preview = addSeptember23ArchivePreview(emptyAimBoard(today), today);
+  const sample = preview.archive.find((group) => group.title === 'University' && group.aims.some((aim) => aim.text === 'Read Chapter 4'));
+  assert.ok(sample);
+  assert.equal(sample.originalDateKey, '2026-09-23');
+  const aimId = sample.aims.find((aim) => aim.text === 'Read Chapter 4').id;
+
+  const completed = completeArchivedSelected(preview, new Set([aimId]));
+  assert.equal(completed.archive.find((group) => group.id === sample.id)?.aims[0].completed, true);
+  const reopened = uncompleteArchivedSelected(completed, new Set([aimId]));
+  assert.equal(reopened.archive.find((group) => group.id === sample.id)?.aims[0].completed, false);
+  assert.equal(completed.active.dateKey, preview.active.dateKey);
+  assert.equal(deleteArchivedSelected(completed, new Set([aimId])).archive.length, 0);
+
+  const staleArchive = { ...preview, archive: preview.archive.map((group) => group.id === sample.id ? { ...group, originalDateKey: '2026-09-24' } : group) };
+  assert.equal(addSeptember23ArchivePreview(staleArchive, today).archive.find((group) => group.id === sample.id)?.originalDateKey, '2026-09-23');
 });
 
 test('aims return to their original order after out-of-order partial archiving', () => {
@@ -284,7 +437,7 @@ test('unarchived older aims take their original places when the group is full', 
   board = addAim(board, 'New seventh', root.id, today);
   board = addGroup(board, 'Later group', today);
   const restored = unarchiveSelected(board, new Set(olderIds), today);
-  assert.deepEqual(restored.active.groups.map((group) => group.title), ['Aims', 'Aims', 'Later group']);
+  assert.deepEqual(restored.active.groups.map((group) => group.title), [DEFAULT_GROUP_TITLE, DEFAULT_GROUP_TITLE, 'Later group']);
   assert.deepEqual(restored.active.groups[0].aims.map((aim) => aim.text), ['Aim 1', 'Aim 2', 'Aim 3', 'Aim 4', 'Aim 5']);
   assert.deepEqual(restored.active.groups[1].aims.map((aim) => aim.text), ['New sixth', 'New seventh']);
   assert.equal(restored.active.groups[1].originGroupId, root.id);
@@ -326,7 +479,7 @@ test('unarchiving across groups restores each title and removes empty archive re
   const archived = archiveSelected(board, ids, today);
   const restored = unarchiveSelected(archived, ids, today);
   assert.equal(restored.archive.length, 0);
-  assert.deepEqual(restored.active.groups.map((group) => group.title), ['Aims', 'Research']);
+  assert.deepEqual(restored.active.groups.map((group) => group.title), [DEFAULT_GROUP_TITLE, 'Research']);
   assert.deepEqual(new Set(restored.active.groups.flatMap((group) => group.aims.map((aim) => aim.id))), ids);
   assert.equal(unarchiveSelected(restored, new Set(['missing']), today), restored);
 });
@@ -341,18 +494,18 @@ test('older archived aims return to today without exceeding five per title', () 
   assert.equal(restored.active.dateKey, '2026-09-25');
   assert.equal(restored.active.groups.length, 2);
   assert.deepEqual(restored.active.groups.map((group) => group.aims.length), [5, 5]);
-  assert.equal(restored.active.groups[1].title, 'Aims');
+  assert.equal(restored.active.groups[1].title, DEFAULT_GROUP_TITLE);
   assert.equal(restored.active.groups[1].dateKey, '2026-09-25');
   assert.equal(restored.archive.length, 0);
 });
 
-test('new day archives only populated groups and starts one fresh Aims group', () => {
+test('new day archives only populated groups and starts one fresh Morning session group', () => {
   let board = withAims(2);
   board = addGroup(board, 'Empty', today);
   const rolled = rollAimBoard(board, tomorrow);
   assert.equal(rolled.active.dateKey, '2026-09-25');
   assert.equal(rolled.active.groups.length, 1);
-  assert.equal(rolled.active.groups[0].title, 'Aims');
+  assert.equal(rolled.active.groups[0].title, DEFAULT_GROUP_TITLE);
   assert.equal(rolled.active.groups[0].isDefault, true);
   assert.deepEqual(rolled.active.groups[0].aims, []);
   assert.equal(rolled.archive.length, 1);
@@ -386,7 +539,7 @@ test('legacy boards gain default identity without losing their first title', () 
 test('malformed storage is ignored while retaining a default group', () => {
   const fresh = restoreAimBoard('{bad json', today);
   assert.equal(fresh.active.groups.length, 1);
-  assert.equal(fresh.active.groups[0].title, 'Aims');
+  assert.equal(fresh.active.groups[0].title, DEFAULT_GROUP_TITLE);
   const initial = withAims(1);
   const corrupted = JSON.parse(JSON.stringify(initial));
   corrupted.active.groups[0].aims.push({ id: 'bad', text: '', note: '', createdAt: 'invalid' });

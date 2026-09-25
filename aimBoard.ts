@@ -1,10 +1,11 @@
 export const MAX_AIMS_PER_GROUP = 5;
-export const DEFAULT_GROUP_TITLE = 'Aims';
+export const DEFAULT_GROUP_TITLE = 'Morning session';
 
 export type AimItem = {
   id: string;
   text: string;
   note: string;
+  completed: boolean;
   createdAt: string;
   order: number;
 };
@@ -16,6 +17,8 @@ export type AimGroup = {
   isDefault: boolean;
   order: number;
   originGroupId?: string;
+  restoredFromDateKey?: string;
+  restoredFromGroupId?: string;
   aims: AimItem[];
 };
 
@@ -80,9 +83,24 @@ function sortGroups(groups: AimGroup[]): AimGroup[] {
   return [...groups].sort((a, b) => a.order - b.order || (a.id === b.originGroupId ? -1 : b.id === a.originGroupId ? 1 : 0));
 }
 
+export function prioritizeOldGroups(groups: AimGroup[]): AimGroup[] {
+  return [...groups].sort((a, b) => {
+    const aIsOld = Boolean(a.restoredFromDateKey);
+    const bIsOld = Boolean(b.restoredFromDateKey);
+    if (aIsOld !== bIsOld) return aIsOld ? -1 : 1;
+    if (aIsOld && bIsOld && a.restoredFromDateKey !== b.restoredFromDateKey) return (b.restoredFromDateKey ?? '').localeCompare(a.restoredFromDateKey ?? '');
+    return a.order - b.order || a.id.localeCompare(b.id);
+  });
+}
+
 export function emptyAimBoard(now = new Date()): AimBoardState {
   const dateKey = localDateKey(now);
   return { active: { dateKey, groups: [defaultGroup(dateKey)] }, archive: [] };
+}
+
+export function starterAimBoard(now = new Date()): AimBoardState {
+  const board = emptyAimBoard(now);
+  return addAim(board, 'Study', board.active.groups[0].id, now, 'Bio chap 4');
 }
 
 function validTimestamp(value: unknown): value is string {
@@ -106,7 +124,7 @@ function readAim(value: unknown, fallbackOrder: number): AimItem | null {
   if (!item || typeof item.id !== 'string' || !item.id || typeof item.text !== 'string' || !item.text.trim() || item.text.trim().length > 100 || typeof item.note !== 'string' || item.note.length > 240 || !validTimestamp(item.createdAt)) return null;
   const inferred = Date.parse(item.createdAt) * 100 + fallbackOrder;
   const order = typeof item.order === 'number' && Number.isSafeInteger(item.order) && item.order >= 0 ? item.order : Number.isSafeInteger(inferred) ? inferred : fallbackOrder;
-  return { id: item.id, text: item.text.trim(), note: item.note, createdAt: item.createdAt, order };
+  return { id: item.id, text: item.text.trim(), note: item.note, completed: item.completed === true, createdAt: item.createdAt, order };
 }
 
 function readGroup(value: unknown, dateKey: string, fallbackOrder: number): AimGroup | null {
@@ -114,7 +132,7 @@ function readGroup(value: unknown, dateKey: string, fallbackOrder: number): AimG
   if (!group || typeof group.id !== 'string' || !group.id || typeof group.title !== 'string' || !group.title.trim() || group.title.trim().length > 40 || group.dateKey !== dateKey || !Array.isArray(group.aims)) return null;
   const aims = group.aims.map((value, index) => readAim(value, index)).filter((aim): aim is AimItem => aim !== null).slice(0, MAX_AIMS_PER_GROUP);
   const order = typeof group.order === 'number' && Number.isSafeInteger(group.order) && group.order >= 0 ? group.order : legacyGroupOrder(group.id, fallbackOrder);
-  return { id: group.id, title: group.title.trim(), dateKey, isDefault: group.isDefault === true, order, originGroupId: typeof group.originGroupId === 'string' && group.originGroupId ? group.originGroupId : undefined, aims: sortAims(aims) };
+  return { id: group.id, title: group.title.trim(), dateKey, isDefault: group.isDefault === true, order, originGroupId: typeof group.originGroupId === 'string' && group.originGroupId ? group.originGroupId : undefined, restoredFromDateKey: typeof group.restoredFromDateKey === 'string' && calendarDay(group.restoredFromDateKey) !== null ? group.restoredFromDateKey : undefined, restoredFromGroupId: typeof group.restoredFromGroupId === 'string' && group.restoredFromGroupId ? group.restoredFromGroupId : undefined, aims: sortAims(aims) };
 }
 
 function ensureDefaultGroup(groups: AimGroup[], dateKey: string): AimGroup[] {
@@ -135,7 +153,7 @@ function readArchivedGroup(value: unknown, fallbackOrder: number): ArchivedGroup
     return aim && validTimestamp(archivedAt) ? [{ ...aim, archivedAt }] : [];
   });
   const originalGroupOrder = typeof group.originalGroupOrder === 'number' && Number.isSafeInteger(group.originalGroupOrder) && group.originalGroupOrder >= 0 ? group.originalGroupOrder : legacyGroupOrder(group.originalGroupId, fallbackOrder);
-  return aims.length ? { id: group.id, originalGroupId: group.originalGroupId, title: group.title.trim(), originalDateKey: group.originalDateKey, originalGroupOrder, archivedAt: group.archivedAt, aims: sortAims(aims) } : null;
+  return { id: group.id, originalGroupId: group.originalGroupId, title: group.title.trim(), originalDateKey: group.originalDateKey, originalGroupOrder, archivedAt: group.archivedAt, aims: sortAims(aims) };
 }
 
 export function retainRecentArchive(archive: ArchivedGroup[], now = new Date()): ArchivedGroup[] {
@@ -146,14 +164,18 @@ export function retainRecentArchive(archive: ArchivedGroup[], now = new Date()):
   });
 }
 
-export function archiveSelected(state: AimBoardState, selectedIds: ReadonlySet<string>, now = new Date()): AimBoardState {
-  if (!selectedIds.size) return state;
+export function archiveSelected(state: AimBoardState, selectedIds: ReadonlySet<string>, now = new Date(), selectedEmptyGroupIds: ReadonlySet<string> = new Set()): AimBoardState {
+  if (!selectedIds.size && !selectedEmptyGroupIds.size) return state;
   const archivedAt = now.toISOString();
   const archived: ArchivedGroup[] = [];
   const groups = state.active.groups.flatMap((group): AimGroup[] => {
+    if (!group.aims.length && selectedEmptyGroupIds.has(group.id)) {
+      archived.push({ id: makeAimId(), originalGroupId: group.restoredFromGroupId ?? group.originGroupId ?? group.id, title: group.title, originalDateKey: group.restoredFromDateKey ?? group.dateKey, originalGroupOrder: group.order, archivedAt, aims: [] });
+      return [];
+    }
     const chosen = group.aims.filter((aim) => selectedIds.has(aim.id));
     if (!chosen.length) return [group];
-    archived.push({ id: makeAimId(), originalGroupId: group.originGroupId ?? group.id, title: group.title, originalDateKey: group.dateKey, originalGroupOrder: group.order, archivedAt, aims: chosen.map((aim) => ({ ...aim, archivedAt })) });
+    archived.push({ id: makeAimId(), originalGroupId: group.restoredFromGroupId ?? group.originGroupId ?? group.id, title: group.title, originalDateKey: group.restoredFromDateKey ?? group.dateKey, originalGroupOrder: group.order, archivedAt, aims: chosen.map((aim) => ({ ...aim, archivedAt })) });
     const remaining = group.aims.filter((aim) => !selectedIds.has(aim.id));
     return remaining.length || group.isDefault ? [{ ...group, aims: remaining }] : [];
   });
@@ -161,7 +183,7 @@ export function archiveSelected(state: AimBoardState, selectedIds: ReadonlySet<s
   const defaultGroupWasEmptied = state.active.groups.some((group) => group.isDefault && group.aims.length > 0 && group.aims.every((aim) => selectedIds.has(aim.id)));
   const survivingOtherGroups = groups.filter((group) => !group.isDefault);
   const activeGroups = defaultGroupWasEmptied && survivingOtherGroups.length ? survivingOtherGroups : groups;
-  return { active: { ...state.active, groups: ensureDefaultGroup(activeGroups, state.active.dateKey) }, archive: retainRecentArchive([...archived, ...state.archive], now) };
+  return { active: { ...state.active, groups: activeGroups.length ? ensureDefaultGroup(activeGroups, state.active.dateKey) : [] }, archive: retainRecentArchive([...archived, ...state.archive], now) };
 }
 
 export function deleteAim(state: AimBoardState, aimId: string): AimBoardState {
@@ -188,40 +210,82 @@ export function deleteSelected(state: AimBoardState, selectedIds: ReadonlySet<st
 export function deleteGroup(state: AimBoardState, groupId: string): AimBoardState {
   if (!state.active.groups.some((group) => group.id === groupId)) return state;
   const remaining = state.active.groups.filter((group) => group.id !== groupId);
-  return { ...state, active: { ...state.active, groups: ensureDefaultGroup(remaining, state.active.dateKey) } };
+  return { ...state, active: { ...state.active, groups: remaining.length ? ensureDefaultGroup(remaining, state.active.dateKey) : [] } };
 }
 
-export function unarchiveSelected(state: AimBoardState, selectedIds: ReadonlySet<string>, now = new Date()): AimBoardState {
-  if (!selectedIds.size) return state;
+export function deleteEmptyGroups(state: AimBoardState, groupIds: ReadonlySet<string>): AimBoardState {
+  if (!groupIds.size) return state;
+  const removableIds = new Set(state.active.groups.filter((group) => groupIds.has(group.id) && group.aims.length === 0).map((group) => group.id));
+  if (!removableIds.size) return state;
+  const remaining = state.active.groups.filter((group) => !removableIds.has(group.id));
+  return { ...state, active: { ...state.active, groups: remaining.length ? ensureDefaultGroup(remaining, state.active.dateKey) : [] } };
+}
+
+export function unarchiveSelected(state: AimBoardState, selectedIds: ReadonlySet<string>, now = new Date(), selectedEmptyGroupIds: ReadonlySet<string> = new Set()): AimBoardState {
+  if (!selectedIds.size && !selectedEmptyGroupIds.size) return state;
   const current = rollAimBoard(state, now);
   let groups = [...current.active.groups];
   const archive: ArchivedGroup[] = [];
-  const batches = new Map<string, { title: string; order: number; aims: AimItem[] }>();
+  const batches = new Map<string, { originalId: string; originalDateKey: string; title: string; order: number; aims: AimItem[] }>();
+  const emptyGroups: ArchivedGroup[] = [];
 
   for (const archivedGroup of current.archive) {
+    if (!archivedGroup.aims.length) {
+      if (selectedEmptyGroupIds.has(archivedGroup.id)) emptyGroups.push(archivedGroup);
+      else archive.push(archivedGroup);
+      continue;
+    }
     const chosen = archivedGroup.aims.filter((aim) => selectedIds.has(aim.id));
     const remaining = archivedGroup.aims.filter((aim) => !selectedIds.has(aim.id));
     if (remaining.length) archive.push({ ...archivedGroup, aims: remaining });
     if (!chosen.length) continue;
-    const batch = batches.get(archivedGroup.originalGroupId) ?? { title: archivedGroup.title, order: archivedGroup.originalGroupOrder, aims: [] };
-    batch.aims.push(...chosen.map((aim): AimItem => ({ id: aim.id, text: aim.text, note: aim.note, createdAt: aim.createdAt, order: aim.order })));
-    batches.set(archivedGroup.originalGroupId, batch);
+    const key = `${archivedGroup.originalGroupId}\u0000${archivedGroup.originalDateKey}`;
+    const batch = batches.get(key) ?? { originalId: archivedGroup.originalGroupId, originalDateKey: archivedGroup.originalDateKey, title: archivedGroup.title, order: archivedGroup.originalGroupOrder, aims: [] };
+    batch.aims.push(...chosen.map((aim): AimItem => ({
+      id: aim.id,
+      text: aim.text,
+      note: aim.note,
+      completed: aim.completed,
+      createdAt: aim.createdAt,
+      order: aim.order,
+    })));
+    batches.set(key, batch);
   }
 
-  if (!batches.size) return current;
-  for (const [originalId, batch] of batches) {
-    const related = groups.filter((group) => group.id === originalId || group.originGroupId === originalId);
+  if (!batches.size && !emptyGroups.length) return current;
+  for (const batch of batches.values()) {
+    const { originalId } = batch;
+    const isOldGroup = batch.originalDateKey !== current.active.dateKey;
+    const related = isOldGroup
+      ? groups.filter((group) => group.restoredFromGroupId === originalId && group.restoredFromDateKey === batch.originalDateKey)
+      : groups.filter((group) => group.id === originalId || group.originGroupId === originalId);
     const original = related.find((group) => group.id === originalId)
-      ?? { id: originalId, title: related[0]?.title ?? batch.title, dateKey: current.active.dateKey, isDefault: false, order: batch.order, aims: [] };
-    const overflow = related.filter((group) => group.id !== originalId);
+      ?? related[0]
+      ?? { id: isOldGroup ? makeAimId() : originalId, title: batch.title, dateKey: current.active.dateKey, isDefault: false, order: batch.order, originGroupId: originalId, ...(isOldGroup ? { restoredFromGroupId: originalId, restoredFromDateKey: batch.originalDateKey } : {}), aims: [] };
+    const overflow = related.filter((group) => group.id !== original.id);
     const orderedAims = sortAims([...related.flatMap((group) => group.aims), ...batch.aims]);
     const fragments: AimGroup[] = [];
     for (let offset = 0; offset < orderedAims.length; offset += MAX_AIMS_PER_GROUP) {
       const existing = fragments.length === 0 ? original : overflow[fragments.length - 1];
-      fragments.push({ ...(existing ?? { id: makeAimId(), title: original.title, dateKey: current.active.dateKey, isDefault: false, order: original.order, originGroupId: originalId }), aims: orderedAims.slice(offset, offset + MAX_AIMS_PER_GROUP) });
+      fragments.push({ ...(existing ?? { id: makeAimId(), title: original.title, dateKey: current.active.dateKey, isDefault: false, order: original.order, originGroupId: originalId, ...(isOldGroup ? { restoredFromGroupId: originalId, restoredFromDateKey: batch.originalDateKey } : {}) }), aims: orderedAims.slice(offset, offset + MAX_AIMS_PER_GROUP) });
     }
     const relatedIds = new Set(related.map((group) => group.id));
     groups = [...groups.filter((group) => !relatedIds.has(group.id)), ...fragments];
+  }
+  for (const archivedGroup of emptyGroups) {
+    const isOldGroup = archivedGroup.originalDateKey !== current.active.dateKey;
+    const originalId = archivedGroup.originalGroupId;
+    const id = isOldGroup || groups.some((group) => group.id === originalId) ? makeAimId() : originalId;
+    groups.push({
+      id,
+      title: archivedGroup.title,
+      dateKey: current.active.dateKey,
+      isDefault: false,
+      order: archivedGroup.originalGroupOrder,
+      originGroupId: originalId,
+      ...(isOldGroup ? { restoredFromGroupId: originalId, restoredFromDateKey: archivedGroup.originalDateKey } : {}),
+      aims: [],
+    });
   }
   return { active: { ...current.active, groups: ensureDefaultGroup(sortGroups(groups), current.active.dateKey) }, archive };
 }
@@ -230,7 +294,7 @@ export function rollAimBoard(state: AimBoardState, now = new Date()): AimBoardSt
   const today = localDateKey(now);
   if (state.active.dateKey === today) {
     const archive = retainRecentArchive(state.archive, now);
-    const groups = ensureDefaultGroup(state.active.groups, today);
+    const groups = state.active.groups.length ? ensureDefaultGroup(state.active.groups, today) : state.active.groups;
     return archive.length === state.archive.length && groups === state.active.groups ? state : { active: { dateKey: today, groups }, archive };
   }
   const selectedIds = new Set(state.active.groups.flatMap((group) => group.aims.map((aim) => aim.id)));
@@ -239,25 +303,28 @@ export function rollAimBoard(state: AimBoardState, now = new Date()): AimBoardSt
 }
 
 export function restoreAimBoard(raw: string | null, now = new Date()): AimBoardState {
-  if (!raw) return emptyAimBoard(now);
+  if (!raw) return starterAimBoard(now);
   try {
     const parsed = record(JSON.parse(raw));
     const active = record(parsed?.active);
     const dateKey = typeof active?.dateKey === 'string' && calendarDay(active.dateKey) !== null ? active.dateKey : localDateKey(now);
-    const groups = ensureDefaultGroup(Array.isArray(active?.groups) ? sortGroups(active.groups.map((value, index) => readGroup(value, dateKey, index)).filter((value): value is AimGroup => value !== null)) : [], dateKey);
+    const storedGroups = Array.isArray(active?.groups) ? active.groups : null;
+    const hasStoredGroups = storedGroups !== null;
+    const restoredGroups = storedGroups ? sortGroups(storedGroups.map((value, index) => readGroup(value, dateKey, index)).filter((value): value is AimGroup => value !== null)) : [];
+    const groups = restoredGroups.length ? ensureDefaultGroup(restoredGroups, dateKey) : hasStoredGroups ? [] : ensureDefaultGroup([], dateKey);
     const rawArchive = Array.isArray(parsed?.archive) ? parsed.archive : [];
     const archive = rawArchive.map((value, index) => readArchivedGroup(value, rawArchive.length - index - 1)).filter((value): value is ArchivedGroup => value !== null);
     return rollAimBoard({ active: { dateKey, groups }, archive }, now);
   } catch {
-    return emptyAimBoard(now);
+    return starterAimBoard(now);
   }
 }
 
-export function addAim(state: AimBoardState, text: string, groupId: string, now = new Date()): AimBoardState {
+export function addAim(state: AimBoardState, text: string, groupId: string, now = new Date(), note = ''): AimBoardState {
   const cleanText = text.trim();
   if (!cleanText || cleanText.length > 100) return state;
   const current = rollAimBoard(state, now);
-  const aim: AimItem = { id: makeAimId(), text: cleanText, note: '', createdAt: now.toISOString(), order: nextOrder(current) };
+  const aim: AimItem = { id: makeAimId(), text: cleanText, note: note.trim().slice(0, 240), completed: false, createdAt: now.toISOString(), order: nextOrder(current) };
   const group = current.active.groups.find((item) => item.id === groupId);
   if (!group || group.aims.length >= MAX_AIMS_PER_GROUP) return current;
   return { ...current, active: { ...current.active, groups: current.active.groups.map((item) => item.id === group.id ? { ...item, aims: [...item.aims, aim] } : item) } };
@@ -267,8 +334,75 @@ export function addGroup(state: AimBoardState, title: string, now = new Date()):
   const clean = title.trim();
   if (!clean || clean.length > 40) return state;
   const current = rollAimBoard(state, now);
-  const group: AimGroup = { id: makeAimId(), title: clean, dateKey: current.active.dateKey, isDefault: false, order: nextOrder(current), aims: [] };
+  const group: AimGroup = { id: makeAimId(), title: clean, dateKey: current.active.dateKey, isDefault: current.active.groups.length === 0, order: nextOrder(current), aims: [] };
   return { ...current, active: { ...current.active, groups: [...current.active.groups, group] } };
+}
+
+export function deleteArchivedSelected(state: AimBoardState, selectedIds: ReadonlySet<string>, selectedEmptyGroupIds: ReadonlySet<string> = new Set()): AimBoardState {
+  if (!selectedIds.size && !selectedEmptyGroupIds.size) return state;
+  let deleted = false;
+  const archive = state.archive.flatMap((group): ArchivedGroup[] => {
+    if (!group.aims.length && selectedEmptyGroupIds.has(group.id)) {
+      deleted = true;
+      return [];
+    }
+    const aims = group.aims.filter((aim) => !selectedIds.has(aim.id));
+    if (aims.length === group.aims.length) return [group];
+    deleted = true;
+    return aims.length ? [{ ...group, aims }] : [];
+  });
+  return deleted ? { ...state, archive } : state;
+}
+
+export function addSeptember23PreviewGroup(state: AimBoardState, now = new Date()): AimBoardState {
+  const current = rollAimBoard(state, now);
+  let previous = emptyAimBoard(new Date(2026, 8, 23, 12));
+  const previousGroup = previous.active.groups[0];
+  previous = renameGroup(previous, previousGroup.id, 'University');
+  previous = addAim(previous, 'Read Chapter 4', previousGroup.id, new Date(2026, 8, 23, 12));
+  const oldAimId = previous.active.groups[0].aims[0]?.id;
+  if (!oldAimId) return current;
+
+  const previousDay = rollAimBoard(previous, now);
+  const base = current.active.groups.some((group) => group.title === 'University')
+    ? current
+    : addGroup(current, 'University', now);
+  const withPreviewArchive = { ...base, archive: [...previousDay.archive, ...base.archive] };
+  const restored = unarchiveSelected(withPreviewArchive, new Set([oldAimId]), now);
+  const previewGroup = restored.active.groups.find((group) => group.restoredFromDateKey === '2026-09-23' && group.title === 'University');
+  if (!previewGroup) return restored;
+
+  const greatestOrder = base.active.groups.reduce((greatest, group) => Math.max(greatest, group.order), -1);
+  return {
+    ...restored,
+    active: {
+      ...restored.active,
+      groups: [
+        ...base.active.groups,
+        { ...previewGroup, isDefault: false, order: greatestOrder + 1 },
+      ],
+    },
+  };
+}
+
+export function addSeptember23ArchivePreview(state: AimBoardState, now = new Date()): AimBoardState {
+  const current = rollAimBoard(state, now);
+  const archivedPreview = current.archive.some((group) => group.title === 'University' && group.aims.some((aim) => aim.text === 'Read Chapter 4'));
+  if (archivedPreview) {
+    let changed = false;
+    const archive = current.archive.map((group) => {
+      if (group.title !== 'University' || !group.aims.some((aim) => aim.text === 'Read Chapter 4') || group.originalDateKey === '2026-09-23') return group;
+      changed = true;
+      return { ...group, originalDateKey: '2026-09-23' };
+    });
+    return changed ? { ...current, archive } : current;
+  }
+
+  const activePreview = current.active.groups.find((group) => group.title === 'University' && group.restoredFromDateKey === '2026-09-23' && group.aims.some((aim) => aim.text === 'Read Chapter 4'))
+    ? current
+    : addSeptember23PreviewGroup(current, now);
+  const previewAim = activePreview.active.groups.find((group) => group.title === 'University' && group.restoredFromDateKey === '2026-09-23')?.aims.find((aim) => aim.text === 'Read Chapter 4');
+  return previewAim ? archiveSelected(activePreview, new Set([previewAim.id]), now) : activePreview;
 }
 
 export function renameGroup(state: AimBoardState, groupId: string, title: string): AimBoardState {
@@ -281,6 +415,62 @@ export function renameAim(state: AimBoardState, aimId: string, text: string): Ai
   const clean = text.trim();
   if (!clean || clean.length > 100) return state;
   return { ...state, active: { ...state.active, groups: state.active.groups.map((group) => ({ ...group, aims: group.aims.map((aim) => aim.id === aimId ? { ...aim, text: clean } : aim) })) } };
+}
+
+export function completeSelected(state: AimBoardState, selectedIds: ReadonlySet<string>): AimBoardState {
+  if (!selectedIds.size) return state;
+  let changed = false;
+  const groups = state.active.groups.map((group) => ({
+    ...group,
+    aims: group.aims.map((aim) => {
+      if (!selectedIds.has(aim.id) || aim.completed) return aim;
+      changed = true;
+      return { ...aim, completed: true };
+    }),
+  }));
+  return changed ? { ...state, active: { ...state.active, groups } } : state;
+}
+
+export function uncompleteSelected(state: AimBoardState, selectedIds: ReadonlySet<string>): AimBoardState {
+  if (!selectedIds.size) return state;
+  let changed = false;
+  const groups = state.active.groups.map((group) => ({
+    ...group,
+    aims: group.aims.map((aim) => {
+      if (!selectedIds.has(aim.id) || !aim.completed) return aim;
+      changed = true;
+      return { ...aim, completed: false };
+    }),
+  }));
+  return changed ? { ...state, active: { ...state.active, groups } } : state;
+}
+
+export function completeArchivedSelected(state: AimBoardState, selectedIds: ReadonlySet<string>): AimBoardState {
+  if (!selectedIds.size) return state;
+  let changed = false;
+  const archive = state.archive.map((group) => ({
+    ...group,
+    aims: group.aims.map((aim) => {
+      if (!selectedIds.has(aim.id) || aim.completed) return aim;
+      changed = true;
+      return { ...aim, completed: true };
+    }),
+  }));
+  return changed ? { ...state, archive } : state;
+}
+
+export function uncompleteArchivedSelected(state: AimBoardState, selectedIds: ReadonlySet<string>): AimBoardState {
+  if (!selectedIds.size) return state;
+  let changed = false;
+  const archive = state.archive.map((group) => ({
+    ...group,
+    aims: group.aims.map((aim) => {
+      if (!selectedIds.has(aim.id) || !aim.completed) return aim;
+      changed = true;
+      return { ...aim, completed: false };
+    }),
+  }));
+  return changed ? { ...state, archive } : state;
 }
 
 export function reorderAim(state: AimBoardState, groupId: string, aimId: string, toIndex: number): AimBoardState {

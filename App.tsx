@@ -10,9 +10,8 @@ import { ActivityIndicator, AppState, AppStateStatus, BackHandler, Keyboard, Key
 import { initialWindowMetrics, SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import appConfig from './app.json';
 import { AimBoardScreen } from './AimBoardScreen';
-import { emptyAimBoard, restoreAimBoard, rollAimBoard } from './aimBoard';
+import { addSeptember23ArchivePreview, emptyAimBoard, restoreAimBoard, rollAimBoard, starterAimBoard } from './aimBoard';
 import type { AimBoardState } from './aimBoard';
-import { getDailyHeadline } from './dailyHeadline';
 import { emptyAboutTapSequence, recordAboutTap } from './developerGesture';
 import { DEFAULT_DISPLAY_NAME, DISPLAY_NAME_MAX_LENGTH, normalizeDisplayName, restoreDisplayName } from './displayName';
 import { STORAGE, STUDIOUS_RESET_KEYS } from './storageKeys';
@@ -34,14 +33,22 @@ function useAppTheme() { const context = useContext(ThemeContext); if (!context)
 const NAV_BAR_HEIGHT = 76;
 const GREETING_FONT_SIZE = 16;
 const GREETING_LINE_HEIGHT = 22;
+const PREVIEW_SEED_KEY = 'studious.september23PreviewSeeded';
+const MAX_BOARD_HISTORY = 20;
+const DEFAULT_HOME_HEADLINE = 'Aims';
+const HOME_HEADLINE_MAX_LENGTH = 20;
 
-function getGreeting(date = new Date()) { const hour = date.getHours(); if (hour >= 5 && hour < 12) return 'GOOD MORNING'; if (hour >= 12 && hour < 17) return 'GOOD AFTERNOON'; return 'GOOD EVENING'; }
+function restoreHomeHeadline(value: string | null): string {
+  const clean = value?.trim();
+  return clean ? clean.slice(0, HOME_HEADLINE_MAX_LENGTH) : DEFAULT_HOME_HEADLINE;
+}
+
 function formatClock(seconds: number) { const safe = Math.max(0, seconds); return `${Math.floor(safe / 60).toString().padStart(2, '0')}:${Math.floor(safe % 60).toString().padStart(2, '0')}`; }
 function boardStructureSignature(board: AimBoardState): string {
   return JSON.stringify([
     board.active.dateKey,
-    board.active.groups.map((group) => [group.id, group.title, group.isDefault, group.aims.map((aim) => [aim.id, aim.text])]),
-    board.archive.map((group) => [group.id, group.title, group.originalDateKey, group.aims.map((aim) => [aim.id, aim.text])]),
+    board.active.groups.map((group) => [group.id, group.title, group.isDefault, group.restoredFromDateKey, group.restoredFromGroupId, group.aims.map((aim) => [aim.id, aim.text, aim.completed])]),
+    board.archive.map((group) => [group.id, group.title, group.originalDateKey, group.aims.map((aim) => [aim.id, aim.text, aim.completed])]),
   ]);
 }
 function isStoredSession(value: unknown): value is StudySession {
@@ -166,7 +173,8 @@ function DisplayNameModal({ visible, currentName, onClose, onSave }: { visible: 
           <View style={styles.modalHandle} />
           <Text style={styles.modalEyebrow}>NICKNAME</Text>
           <Text style={styles.modalCopy}>What&apos;s your nickname?</Text>
-          <TextInput value={value} onChangeText={(text) => { setValue(text); if (text.trim()) setInputError(false); }} placeholder="Enter your nickname..." placeholderTextColor={colors.textMuted} maxLength={DISPLAY_NAME_MAX_LENGTH} returnKeyType="done" onSubmitEditing={save} keyboardAppearance={effectiveTheme} style={[styles.nameInput, inputError && styles.inputShellError]} accessibilityLabel="Nickname" autoCapitalize="words" selectTextOnFocus />
+          <TextInput value={value} onChangeText={(text) => { setValue(text); if (text.trim()) setInputError(false); }} placeholder="Enter your nickname..." placeholderTextColor={colors.textMuted} maxLength={DISPLAY_NAME_MAX_LENGTH} returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" onSubmitEditing={save} keyboardAppearance={effectiveTheme} style={[styles.nameInput, inputError && styles.inputShellError]} accessibilityLabel="Nickname" autoCapitalize="words" selectTextOnFocus />
+          <Text style={{ alignSelf: 'flex-end', marginTop: 4, fontFamily: fonts.sans.medium, fontSize: 10, color: colors.textMuted }}>{value.length} / {DISPLAY_NAME_MAX_LENGTH}</Text>
           {inputError && <Text style={styles.modalError}>Enter a nickname to continue.</Text>}
           <View style={styles.modalActions}>
             <PressableScale onPress={() => { Keyboard.dismiss(); onClose(); }} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></PressableScale>
@@ -178,25 +186,35 @@ function DisplayNameModal({ visible, currentName, onClose, onSave }: { visible: 
   </Modal>;
 }
 
-function HomeScreen({ displayName, onEditName, board, onBoardChange }: { displayName: string; onEditName: () => void; board: AimBoardState; onBoardChange: (update: (current: AimBoardState) => AimBoardState) => void }) {
+function HomeScreen({ headline, onHeadlineChange, board, onBoardChange, onUndoBoard, onRedoBoard, canUndoBoard, canRedoBoard }: { headline: string; onHeadlineChange: (value: string) => void; board: AimBoardState; onBoardChange: (update: (current: AimBoardState) => AimBoardState) => void; onUndoBoard: () => void; onRedoBoard: () => void; canUndoBoard: boolean; canRedoBoard: boolean }) {
   const { theme: colors, styles, themeMode, effectiveTheme, openAppearance } = useAppTheme();
   const { width } = useWindowDimensions();
-  return <AimBoardScreen state={board} onChange={onBoardChange} colors={colors} effectiveTheme={effectiveTheme} scrollContentStyle={styles.scrollContent} header={<>
-    <View style={styles.headerRow}>
-      <View style={styles.greetingRow}>
-        <Text style={[styles.homeGreetingText, styles.homeGreeting]} allowFontScaling>{getGreeting()},</Text>
-        <PressableScale onPress={onEditName} accessibilityLabel="Edit nickname" style={styles.nameEditTarget}>
-          <Text style={[styles.homeGreetingText, styles.displayName]} allowFontScaling>{displayName}</Text>
-          <View style={styles.namePencil}><EditPencilIcon color={colors.textMuted} /></View>
-        </PressableScale>
+  const [headlineDraft, setHeadlineDraft] = useState<string | null>(null);
+  const headlineEditRef = useRef<string | null>(null);
+  const finishHeadlineEdit = () => {
+    const draft = headlineEditRef.current;
+    if (draft === null) return;
+    headlineEditRef.current = null;
+    setHeadlineDraft(null);
+    const clean = draft.trim();
+    if (clean && clean !== headline) onHeadlineChange(clean);
+  };
+  return <AimBoardScreen state={board} onChange={onBoardChange} onUndo={onUndoBoard} onRedo={onRedoBoard} canUndo={canUndoBoard} canRedo={canRedoBoard} colors={colors} effectiveTheme={effectiveTheme} scrollContentStyle={styles.scrollContent} header={<>
+    <View style={[styles.headerRow, { minHeight: 90 }]}>
+      <View style={{ flex: 1, marginRight: 12 }}>
+        {headlineDraft !== null
+          ? <>
+            <TextInput value={headlineDraft} onChangeText={(next) => { headlineEditRef.current = next; setHeadlineDraft(next); }} onBlur={finishHeadlineEdit} onSubmitEditing={finishHeadlineEdit} autoFocus multiline returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" maxLength={HOME_HEADLINE_MAX_LENGTH} keyboardAppearance={effectiveTheme} underlineColorAndroid="transparent" accessibilityLabel="Edit home heading" style={[styles.headline, width < 380 && styles.headlineCompact, width < 340 && styles.headlineSmall, { width: '100%', padding: 0, textAlignVertical: 'top' }]} />
+            <Text style={{ alignSelf: 'flex-end', marginTop: 3, fontFamily: fonts.sans.medium, fontSize: 10, color: colors.textMuted }}>{headlineDraft.length} / {HOME_HEADLINE_MAX_LENGTH}</Text>
+          </>
+          : <Pressable accessibilityRole="button" accessibilityLabel={`Edit heading: ${headline}`} onPress={() => { headlineEditRef.current = headline; setHeadlineDraft(headline); }} style={({ pressed }) => [{ alignSelf: 'flex-start', maxWidth: '100%', borderRadius: 12 }, pressed && { backgroundColor: colors.surfaceMuted, opacity: 0.85 }]}>
+            <Text style={[styles.headline, width < 380 && styles.headlineCompact, width < 340 && styles.headlineSmall]}>{headline}</Text>
+          </Pressable>}
       </View>
-      <Pressable accessibilityRole="button" accessibilityLabel="Appearance settings" onPress={() => { Keyboard.dismiss(); openAppearance(); }} style={({ pressed }) => [styles.profileCircle, pressed && styles.themeTogglePressed]}>
-        <Feather name={themeMode === 'system' ? 'smartphone' : themeMode === 'light' ? 'sun' : 'moon'} size={21} color={colors.textMuted} />
+      <Pressable accessibilityRole="button" accessibilityLabel="Appearance settings" onPress={() => { Keyboard.dismiss(); openAppearance(); }} style={({ pressed }) => [styles.profileCircle, { width: 44, height: 44, borderRadius: 22 }, pressed && styles.themeTogglePressed]}>
+        <Feather name={themeMode === 'system' ? 'smartphone' : themeMode === 'light' ? 'sun' : 'moon'} size={18} color={colors.textMuted} />
       </Pressable>
     </View>
-    <Pressable onPress={Keyboard.dismiss} accessible={false}>
-      <View style={styles.headlineRow}><Text style={[styles.headline, width < 380 && styles.headlineCompact, width < 340 && styles.headlineSmall]}>{getDailyHeadline()}</Text></View>
-    </Pressable>
   </>} />;
 }
 
@@ -215,12 +233,16 @@ return (
   );
 }
 
-function SettingsScreen({ developerMode, onOpenAbout, onResetPress }: { developerMode: boolean; onOpenAbout: () => void; onResetPress: () => void }) {
+function SettingsScreen({ displayName, onEditName, developerMode, onOpenAbout, onResetPress }: { displayName: string; onEditName: () => void; developerMode: boolean; onOpenAbout: () => void; onResetPress: () => void }) {
   const { theme: colors, styles } = useAppTheme();
   return <View style={styles.settingsScreen}>
     <Text style={styles.greeting}>SETTINGS</Text>
     <PressableScale onPress={onOpenAbout} accessibilityLabel="About" accessibilityHint="View information about Studious" style={styles.settingsRow}>
       <View style={styles.settingsRowLeading}><View style={styles.settingsIcon}><Feather name="info" size={20} color={colors.sage} /></View><Text style={styles.settingsRowText}>About</Text></View>
+      <Feather name="chevron-right" size={19} color={colors.textMuted} />
+    </PressableScale>
+    <PressableScale onPress={onEditName} accessibilityLabel="Edit nickname" style={styles.settingsRow}>
+      <View style={styles.settingsRowLeading}><View style={styles.settingsIcon}><EditPencilIcon color={colors.textMuted} /></View><View style={{ flexShrink: 1 }}><Text style={styles.settingsRowText}>Nickname</Text><Text numberOfLines={1} style={{ fontFamily: fonts.sans.regular, fontSize: 12, color: colors.textMuted }}>{displayName}</Text></View></View>
       <Feather name="chevron-right" size={19} color={colors.textMuted} />
     </PressableScale>
     {__DEV__ && developerMode && <View style={styles.developerSection}>
@@ -264,8 +286,11 @@ export default function App() {
   const deviceScheme = useColorScheme();
   const [screen, setScreen] = useState<Screen>('Home');
   const [displayName, setDisplayName] = useState(DEFAULT_DISPLAY_NAME);
+  const [homeHeadline, setHomeHeadline] = useState(DEFAULT_HOME_HEADLINE);
   const [history, setHistory] = useState<StudySession[]>([]);
   const [boardState, setBoardState] = useState<AimBoardState>(() => emptyAimBoard());
+  const [canUndoBoard, setCanUndoBoard] = useState(false);
+  const [canRedoBoard, setCanRedoBoard] = useState(false);
   const [activeSession, setActiveSession] = useState<StudySession>();
   const [endModal, setEndModal] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
@@ -277,18 +302,60 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [themeMode, setThemeModeState] = useState<ThemeMode>('system');
-  // Refreshes Home's local-time greeting and date-derived headline while the app stays open.
-  const [, setMinute] = useState(0);
   const completedNotifiedRef = useRef<string | null>(null);
   const aboutTapRef = useRef(emptyAboutTapSequence);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resettingRef = useRef(false);
   const pendingWritesRef = useRef<Set<Promise<unknown>>>(new Set());
   const boardStateRef = useRef(boardState);
+  const boardUndoStackRef = useRef<AimBoardState[]>([]);
+  const boardRedoStackRef = useRef<AimBoardState[]>([]);
   const boardWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const boardWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const boardStructureRef = useRef<string | null>(null);
   useEffect(() => { boardStateRef.current = boardState; }, [boardState]);
+
+  const clearBoardHistory = useCallback(() => {
+    boardUndoStackRef.current = [];
+    boardRedoStackRef.current = [];
+    setCanUndoBoard(false);
+    setCanRedoBoard(false);
+  }, []);
+  const updateBoard = useCallback((update: (current: AimBoardState) => AimBoardState) => {
+    const current = boardStateRef.current;
+    const next = update(current);
+    if (next === current) return;
+    boardUndoStackRef.current = [...boardUndoStackRef.current, current].slice(-MAX_BOARD_HISTORY);
+    boardRedoStackRef.current = [];
+    boardStateRef.current = next;
+    setBoardState(next);
+    setCanUndoBoard(true);
+    setCanRedoBoard(false);
+  }, []);
+  const undoBoard = useCallback(() => {
+    const stack = boardUndoStackRef.current;
+    const previous = stack[stack.length - 1];
+    if (!previous) return;
+    const current = boardStateRef.current;
+    boardUndoStackRef.current = stack.slice(0, -1);
+    boardRedoStackRef.current = [...boardRedoStackRef.current, current].slice(-MAX_BOARD_HISTORY);
+    boardStateRef.current = previous;
+    setBoardState(previous);
+    setCanUndoBoard(boardUndoStackRef.current.length > 0);
+    setCanRedoBoard(true);
+  }, []);
+  const redoBoard = useCallback(() => {
+    const stack = boardRedoStackRef.current;
+    const next = stack[stack.length - 1];
+    if (!next) return;
+    const current = boardStateRef.current;
+    boardRedoStackRef.current = stack.slice(0, -1);
+    boardUndoStackRef.current = [...boardUndoStackRef.current, current].slice(-MAX_BOARD_HISTORY);
+    boardStateRef.current = next;
+    setBoardState(next);
+    setCanUndoBoard(true);
+    setCanRedoBoard(boardRedoStackRef.current.length > 0);
+  }, []);
 
   const effectiveTheme = resolveEffectiveTheme(themeMode, deviceScheme);
   const theme = themes[effectiveTheme];
@@ -326,13 +393,13 @@ export default function App() {
     setScreen('About');
   }, []);
   const onAboutTitlePress = useCallback(() => {
-    if (!__DEV__ || developerMode) return;
+    if (!__DEV__) return;
     const result = recordAboutTap(aboutTapRef.current, Date.now());
     aboutTapRef.current = result.sequence;
     if (result.unlocked) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setDeveloperMode(true);
-      showToast('Developer mode enabled');
+      setDeveloperMode(!developerMode);
+      showToast(developerMode ? 'Developer mode disabled' : 'Developer mode enabled');
     }
   }, [developerMode, showToast]);
   useEffect(() => {
@@ -347,14 +414,25 @@ export default function App() {
   useEffect(() => {
     Promise.all([
       AsyncStorage.getItem(STORAGE.displayName),
+      AsyncStorage.getItem(STORAGE.homeHeadline),
       AsyncStorage.getItem(STORAGE.history),
       AsyncStorage.getItem(STORAGE.aimBoard),
+      __DEV__ ? AsyncStorage.getItem(PREVIEW_SEED_KEY) : Promise.resolve(null),
       AsyncStorage.getItem(STORAGE.theme),
       AsyncStorage.getItem(STORAGE.legacyTheme),
       __DEV__ ? AsyncStorage.getItem(STORAGE.developer) : Promise.resolve(null),
-    ]).then(async ([storedDisplayName, storedHistory, storedBoard, storedTheme, legacyTheme, storedDeveloperMode]) => {
-      setBoardState(restoreAimBoard(storedBoard));
+    ]).then(async ([storedDisplayName, storedHomeHeadline, storedHistory, storedBoard, previewSeeded, storedTheme, legacyTheme, storedDeveloperMode]) => {
+      let restoredBoard = restoreAimBoard(storedBoard);
+      if (__DEV__ && previewSeeded !== 'reset' && previewSeeded !== 'archive-v2') {
+        restoredBoard = addSeptember23ArchivePreview(restoredBoard);
+        await AsyncStorage.setItem(STORAGE.aimBoard, JSON.stringify(restoredBoard));
+        await AsyncStorage.setItem(PREVIEW_SEED_KEY, 'archive-v2');
+      }
+      clearBoardHistory();
+      boardStateRef.current = restoredBoard;
+      setBoardState(restoredBoard);
       setDisplayName(restoreDisplayName(storedDisplayName));
+      setHomeHeadline(restoreHomeHeadline(storedHomeHeadline));
       if (__DEV__ && storedDeveloperMode === 'true') setDeveloperMode(true);
       let restoredHistory: StudySession[] = [];
       if (storedHistory) {
@@ -374,8 +452,9 @@ export default function App() {
     }).catch((error: unknown) => {
       if (__DEV__) console.warn('Could not restore local preferences:', error);
     }).finally(() => setReady(true));
-  }, []);
+  }, [clearBoardHistory]);
   useEffect(() => { if (ready && !resettingRef.current) trackWrite(displayName === DEFAULT_DISPLAY_NAME ? AsyncStorage.removeItem(STORAGE.displayName) : AsyncStorage.setItem(STORAGE.displayName, displayName)); }, [displayName, ready, trackWrite]);
+  useEffect(() => { if (ready && !resettingRef.current) trackWrite(homeHeadline === DEFAULT_HOME_HEADLINE ? AsyncStorage.removeItem(STORAGE.homeHeadline) : AsyncStorage.setItem(STORAGE.homeHeadline, homeHeadline)); }, [homeHeadline, ready, trackWrite]);
   useEffect(() => { if (ready && !resettingRef.current) trackWrite(AsyncStorage.setItem(STORAGE.history, JSON.stringify(history.slice(0, 20)))); }, [history, ready, trackWrite]);
   useEffect(() => {
     if (!ready || resettingRef.current) return undefined;
@@ -391,7 +470,14 @@ export default function App() {
   }, [boardState, ready, persistBoard]);
   useEffect(() => {
     if (!ready) return undefined;
-    const checkDay = () => setBoardState((current) => rollAimBoard(current));
+    const checkDay = () => {
+      const current = boardStateRef.current;
+      const next = rollAimBoard(current);
+      if (next === current) return;
+      clearBoardHistory();
+      boardStateRef.current = next;
+      setBoardState(next);
+    };
     const interval = setInterval(checkDay, 60_000);
     const subscription = AppState.addEventListener('change', (next) => {
       if (next === 'active') checkDay();
@@ -402,7 +488,7 @@ export default function App() {
       }
     });
     return () => { clearInterval(interval); subscription.remove(); };
-  }, [ready, persistBoard]);
+  }, [ready, persistBoard, clearBoardHistory]);
   useEffect(() => { if (ready && !resettingRef.current) trackWrite(AsyncStorage.setItem(STORAGE.theme, themeMode)); }, [ready, themeMode, trackWrite]);
   useEffect(() => { if (__DEV__ && ready && !resettingRef.current) trackWrite(developerMode ? AsyncStorage.setItem(STORAGE.developer, 'true') : AsyncStorage.removeItem(STORAGE.developer)); }, [developerMode, ready, trackWrite]);
   useEffect(() => { if (resetEpoch > 0) resettingRef.current = false; }, [resetEpoch]);
@@ -413,7 +499,9 @@ export default function App() {
     setHistory((items) => items.some((item) => item.id === activeSession.id) ? items : [activeSession, ...items].slice(0, 20));
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   }, [activeSession]);
-useEffect(() => { if (activeSession?.status !== 'active') return undefined; const interval = setInterval(tick, 1000); return () => clearInterval(interval); }, [activeSession?.status, tick]); useEffect(() => { const onAppStateChange = (nextState: AppStateStatus) => { if (nextState === 'active') { setMinute((value) => value + 1); tick(); } }; const subscription = AppState.addEventListener('change', onAppStateChange); const interval = setInterval(() => setMinute((value) => value + 1), 60000); return () => { subscription.remove(); clearInterval(interval); }; }, [tick]); useEffect(() => { if (__DEV__ && fontError) console.warn('Local fonts failed to load:', fontError); if ((fontsLoaded || fontError) && ready) void SplashScreen.hideAsync(); }, [fontError, fontsLoaded, ready]);
+  useEffect(() => { if (activeSession?.status !== 'active') return undefined; const interval = setInterval(tick, 1000); return () => clearInterval(interval); }, [activeSession?.status, tick]);
+  useEffect(() => { const subscription = AppState.addEventListener('change', (nextState: AppStateStatus) => { if (nextState === 'active') tick(); }); return () => subscription.remove(); }, [tick]);
+  useEffect(() => { if (__DEV__ && fontError) console.warn('Local fonts failed to load:', fontError); if ((fontsLoaded || fontError) && ready) void SplashScreen.hideAsync(); }, [fontError, fontsLoaded, ready]);
   const pauseSession = () => setActiveSession((current) => current?.status === 'active' && current.lastResumedAt ? { ...current, remainingSeconds: Math.max(0, current.remainingSeconds - Math.floor((Date.now() - current.lastResumedAt) / 1000)), status: 'paused', lastResumedAt: undefined } : current);
   const resumeSession = () => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setActiveSession((current) => current?.status === 'paused' ? { ...current, status: 'active', lastResumedAt: Date.now() } : current); };
   const endSession = () => { if (!activeSession) return; const ended = { ...activeSession, status: 'ended' as const, finishedAt: new Date().toISOString() }; setHistory((items) => [ended, ...items.filter((item) => item.id !== ended.id)].slice(0, 20)); setActiveSession(undefined); setEndModal(false); setScreen('Home'); };
@@ -426,13 +514,16 @@ useEffect(() => { if (activeSession?.status !== 'active') return undefined; cons
     try {
       await Promise.allSettled([...pendingWritesRef.current]);
       await AsyncStorage.multiRemove(STUDIOUS_RESET_KEYS);
-      const emptyBoard = emptyAimBoard();
+      await AsyncStorage.setItem(PREVIEW_SEED_KEY, 'reset');
+      const emptyBoard = starterAimBoard();
       boardStructureRef.current = null;
+      clearBoardHistory();
       boardStateRef.current = emptyBoard;
       setBoardState(emptyBoard);
       aboutTapRef.current = emptyAboutTapSequence;
       completedNotifiedRef.current = null;
       setDisplayName(DEFAULT_DISPLAY_NAME);
+      setHomeHeadline(DEFAULT_HOME_HEADLINE);
       setHistory([]);
       setActiveSession(undefined);
       setThemeModeState('system');
@@ -459,9 +550,9 @@ useEffect(() => { if (activeSession?.status !== 'active') return undefined; cons
       <StatusBar style={effectiveTheme === 'dark' ? 'light' : 'dark'} animated />
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={styles.flex}>
-          {screen === 'Home' && <HomeScreen key={resetEpoch} board={boardState} onBoardChange={setBoardState} displayName={displayName} onEditName={() => { Keyboard.dismiss(); setNameModalOpen(true); }} />}
+          {screen === 'Home' && <HomeScreen key={resetEpoch} board={boardState} onBoardChange={updateBoard} onUndoBoard={undoBoard} onRedoBoard={redoBoard} canUndoBoard={canUndoBoard} canRedoBoard={canRedoBoard} headline={homeHeadline} onHeadlineChange={setHomeHeadline} />}
           {screen === 'Plan' && <PlaceholderScreen screen="Plan" title="Plan your study time." copy="Planning tools are coming next." icon="calendar" />}
-          {screen === 'Settings' && <SettingsScreen developerMode={developerMode} onOpenAbout={openAbout} onResetPress={() => setResetModal(true)} />}
+          {screen === 'Settings' && <SettingsScreen displayName={displayName} onEditName={() => { Keyboard.dismiss(); setNameModalOpen(true); }} developerMode={developerMode} onOpenAbout={openAbout} onResetPress={() => setResetModal(true)} />}
           {screen === 'About' && <AboutScreen onBack={goBackFromAbout} onTitlePress={onAboutTitlePress} />}
           {screen === 'Focus' && <FocusScreen session={activeSession} onPause={pauseSession} onResume={resumeSession} onEnd={() => setEndModal(true)} onReturn={() => setScreen('Home')} />}
         </View>

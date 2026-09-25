@@ -1,6 +1,7 @@
 export const STORAGE = {
   aim: '@studious/aim',
   displayName: 'studious.displayName',
+  homeHeadline: 'studious.homeHeadline',
   timer: '@studious/timer',
   custom: '@studious/custom-timer',
   history: '@studious/session-history',
