@@ -47,8 +47,8 @@ function formatClock(seconds: number) { const safe = Math.max(0, seconds); retur
 function boardStructureSignature(board: AimBoardState): string {
   return JSON.stringify([
     board.active.dateKey,
-    board.active.groups.map((group) => [group.id, group.title, group.isDefault, group.restoredFromDateKey, group.restoredFromGroupId, group.aims.map((aim) => [aim.id, aim.text, aim.completed])]),
-    board.archive.map((group) => [group.id, group.title, group.originalDateKey, group.aims.map((aim) => [aim.id, aim.text, aim.completed])]),
+    board.active.groups.map((group) => [group.id, group.title, group.isDefault, group.restoredFromDateKey, group.restoredFromGroupId, group.emptyCompleted, group.aims.map((aim) => [aim.id, aim.text, aim.completed])]),
+    board.archive.map((group) => [group.id, group.title, group.originalDateKey, group.emptyCompleted, group.aims.map((aim) => [aim.id, aim.text, aim.completed])]),
   ]);
 }
 function isStoredSession(value: unknown): value is StudySession {
@@ -78,10 +78,6 @@ function AppToast({ message }: { message: string }) {
   const { styles } = useAppTheme();
   const { bottom } = useSafeAreaInsets();
   return <View pointerEvents="none" style={[styles.toast, { bottom: NAV_BAR_HEIGHT + 16 + bottom }]}><Text style={styles.toastText}>{message}</Text></View>;
-}
-
-function EditPencilIcon({ color }: { color: string }) {
-  return <Feather name="edit-3" size={17} color={color} accessible={false} />;
 }
 
 function MindAuraIcon({ size = 24, color }: { size?: number; color: string }) {
@@ -187,9 +183,11 @@ function DisplayNameModal({ visible, currentName, onClose, onSave }: { visible: 
 }
 
 function HomeScreen({ headline, onHeadlineChange, board, onBoardChange, onUndoBoard, onRedoBoard, canUndoBoard, canRedoBoard }: { headline: string; onHeadlineChange: (value: string) => void; board: AimBoardState; onBoardChange: (update: (current: AimBoardState) => AimBoardState) => void; onUndoBoard: () => void; onRedoBoard: () => void; canUndoBoard: boolean; canRedoBoard: boolean }) {
-  const { theme: colors, styles, themeMode, effectiveTheme, openAppearance } = useAppTheme();
+  const { theme: colors, styles, effectiveTheme } = useAppTheme();
   const { width } = useWindowDimensions();
   const [headlineDraft, setHeadlineDraft] = useState<string | null>(null);
+  const [headlineTapSize, setHeadlineTapSize] = useState<{ key: string; width: number } | null>(null);
+  const headlineMeasureKey = `${headline}:${width}`;
   const headlineEditRef = useRef<string | null>(null);
   const finishHeadlineEdit = () => {
     const draft = headlineEditRef.current;
@@ -199,21 +197,19 @@ function HomeScreen({ headline, onHeadlineChange, board, onBoardChange, onUndoBo
     const clean = draft.trim();
     if (clean && clean !== headline) onHeadlineChange(clean);
   };
-  return <AimBoardScreen state={board} onChange={onBoardChange} onUndo={onUndoBoard} onRedo={onRedoBoard} canUndo={canUndoBoard} canRedo={canRedoBoard} colors={colors} effectiveTheme={effectiveTheme} scrollContentStyle={styles.scrollContent} header={<>
-    <View style={[styles.headerRow, { minHeight: 90 }]}>
-      <View style={{ flex: 1, marginRight: 12 }}>
+  return <AimBoardScreen state={board} onChange={onBoardChange} onUndo={onUndoBoard} onRedo={onRedoBoard} canUndo={canUndoBoard} canRedo={canRedoBoard} colors={colors} effectiveTheme={effectiveTheme} scrollContentStyle={styles.scrollContent} header={(organizeToggle) => <>
+    <View style={styles.headerRow}>
+      <View style={{ flex: 1, marginRight: 20 }}>
         {headlineDraft !== null
           ? <>
             <TextInput value={headlineDraft} onChangeText={(next) => { headlineEditRef.current = next; setHeadlineDraft(next); }} onBlur={finishHeadlineEdit} onSubmitEditing={finishHeadlineEdit} autoFocus multiline returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" maxLength={HOME_HEADLINE_MAX_LENGTH} keyboardAppearance={effectiveTheme} underlineColorAndroid="transparent" accessibilityLabel="Edit home heading" style={[styles.headline, width < 380 && styles.headlineCompact, width < 340 && styles.headlineSmall, { width: '100%', padding: 0, textAlignVertical: 'top' }]} />
             <Text style={{ alignSelf: 'flex-end', marginTop: 3, fontFamily: fonts.sans.medium, fontSize: 10, color: colors.textMuted }}>{headlineDraft.length} / {HOME_HEADLINE_MAX_LENGTH}</Text>
           </>
-          : <Pressable accessibilityRole="button" accessibilityLabel={`Edit heading: ${headline}`} onPress={() => { headlineEditRef.current = headline; setHeadlineDraft(headline); }} style={({ pressed }) => [{ alignSelf: 'flex-start', maxWidth: '100%', borderRadius: 12 }, pressed && { backgroundColor: colors.surfaceMuted, opacity: 0.85 }]}>
-            <Text style={[styles.headline, width < 380 && styles.headlineCompact, width < 340 && styles.headlineSmall]}>{headline}</Text>
+          : <Pressable accessibilityRole="button" accessibilityLabel={`Edit heading: ${headline}`} onPress={() => { headlineEditRef.current = headline; setHeadlineDraft(headline); }} style={({ pressed }) => [{ alignSelf: 'flex-start', maxWidth: '100%', width: headlineTapSize?.key === headlineMeasureKey ? headlineTapSize.width : undefined, borderRadius: 12 }, pressed && { backgroundColor: colors.surfaceMuted, opacity: 0.85 }]}>
+            <Text onTextLayout={({ nativeEvent }) => { if (!nativeEvent.lines.length) return; const measuredWidth = Math.ceil(Math.max(...nativeEvent.lines.map((line) => line.width))) + 2; setHeadlineTapSize((current) => current?.key === headlineMeasureKey ? current : { key: headlineMeasureKey, width: measuredWidth }); }} style={[styles.headline, width < 380 && styles.headlineCompact, width < 340 && styles.headlineSmall]}>{headline}</Text>
           </Pressable>}
       </View>
-      <Pressable accessibilityRole="button" accessibilityLabel="Appearance settings" onPress={() => { Keyboard.dismiss(); openAppearance(); }} style={({ pressed }) => [styles.profileCircle, { width: 44, height: 44, borderRadius: 22 }, pressed && styles.themeTogglePressed]}>
-        <Feather name={themeMode === 'system' ? 'smartphone' : themeMode === 'light' ? 'sun' : 'moon'} size={18} color={colors.textMuted} />
-      </Pressable>
+      {organizeToggle}
     </View>
   </>} />;
 }
@@ -233,16 +229,16 @@ return (
   );
 }
 
-function SettingsScreen({ displayName, onEditName, developerMode, onOpenAbout, onResetPress }: { displayName: string; onEditName: () => void; developerMode: boolean; onOpenAbout: () => void; onResetPress: () => void }) {
-  const { theme: colors, styles } = useAppTheme();
+function SettingsScreen({ developerMode, onOpenAbout, onResetPress }: { developerMode: boolean; onOpenAbout: () => void; onResetPress: () => void }) {
+  const { theme: colors, styles, openAppearance } = useAppTheme();
   return <View style={styles.settingsScreen}>
     <Text style={styles.greeting}>SETTINGS</Text>
     <PressableScale onPress={onOpenAbout} accessibilityLabel="About" accessibilityHint="View information about Studious" style={styles.settingsRow}>
       <View style={styles.settingsRowLeading}><View style={styles.settingsIcon}><Feather name="info" size={20} color={colors.sage} /></View><Text style={styles.settingsRowText}>About</Text></View>
       <Feather name="chevron-right" size={19} color={colors.textMuted} />
     </PressableScale>
-    <PressableScale onPress={onEditName} accessibilityLabel="Edit nickname" style={styles.settingsRow}>
-      <View style={styles.settingsRowLeading}><View style={styles.settingsIcon}><EditPencilIcon color={colors.textMuted} /></View><View style={{ flexShrink: 1 }}><Text style={styles.settingsRowText}>Nickname</Text><Text numberOfLines={1} style={{ fontFamily: fonts.sans.regular, fontSize: 12, color: colors.textMuted }}>{displayName}</Text></View></View>
+    <PressableScale onPress={openAppearance} accessibilityLabel="Appearance settings" style={styles.settingsRow}>
+      <View style={styles.settingsRowLeading}><View style={styles.settingsIcon}><Feather name="sun" size={20} color={colors.sage} /></View><Text style={styles.settingsRowText}>Appearance</Text></View>
       <Feather name="chevron-right" size={19} color={colors.textMuted} />
     </PressableScale>
     {__DEV__ && developerMode && <View style={styles.developerSection}>
@@ -552,7 +548,7 @@ export default function App() {
         <View style={styles.flex}>
           {screen === 'Home' && <HomeScreen key={resetEpoch} board={boardState} onBoardChange={updateBoard} onUndoBoard={undoBoard} onRedoBoard={redoBoard} canUndoBoard={canUndoBoard} canRedoBoard={canRedoBoard} headline={homeHeadline} onHeadlineChange={setHomeHeadline} />}
           {screen === 'Plan' && <PlaceholderScreen screen="Plan" title="Plan your study time." copy="Planning tools are coming next." icon="calendar" />}
-          {screen === 'Settings' && <SettingsScreen displayName={displayName} onEditName={() => { Keyboard.dismiss(); setNameModalOpen(true); }} developerMode={developerMode} onOpenAbout={openAbout} onResetPress={() => setResetModal(true)} />}
+          {screen === 'Settings' && <SettingsScreen developerMode={developerMode} onOpenAbout={openAbout} onResetPress={() => setResetModal(true)} />}
           {screen === 'About' && <AboutScreen onBack={goBackFromAbout} onTitlePress={onAboutTitlePress} />}
           {screen === 'Focus' && <FocusScreen session={activeSession} onPause={pauseSession} onResume={resumeSession} onEnd={() => setEndModal(true)} onReturn={() => setScreen('Home')} />}
         </View>
