@@ -1,5 +1,10 @@
 This is an Expo/React Native mobile application. Prioritize mobile-first patterns, performance, and cross-platform compatibility.
 
+## Typography
+
+- Use the locally bundled Inter font for UI text such as navigation labels, small headers, settings labels, footers, counters, and numbers in ordered lists.
+- Use the locally bundled Source Serif 4 font for display typography throughout the app, including the Plan heading, goal names, Archive title, modal titles, and splash wordmark. Keep editing fields in the same font as their displayed text.
+
 ## Expo has changed — do not trust your training data
 
 Expo ships breaking changes every SDK release. APIs you remember are likely renamed, moved, or removed. Before writing any code that touches an Expo, EAS, or React Native API:

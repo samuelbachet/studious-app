@@ -2,81 +2,60 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Animated, BackHandler, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Animated, BackHandler, Easing, Keyboard, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { GestureResponderEvent, LayoutChangeEvent, PressableProps, StyleProp, ViewStyle } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { addAim, addGroup, archiveSelected, completeArchivedSelected, completeSelected, deleteArchivedSelected, deleteEmptyGroups, deleteSelected, MAX_AIMS_PER_GROUP, prioritizeOldGroups, renameAim, renameGroup, reorderAim, reorderGroup, toggleArchivedEmptyGroupCompleted, toggleEmptyGroupCompleted, unarchiveSelected, uncompleteArchivedSelected, uncompleteSelected, updateAimNote, updateArchivedNote } from './aimBoard';
+import { addAim, addGroup, ARCHIVE_TITLE_MAX_LENGTH, archiveSelected, completeArchivedSelected, completeSelected, completionDraftChanges, completionInDraft, deleteAim, deleteGroup, deleteOrganizedArchivedSelected, deleteOrganizedSelected, goalCompletionInDraft, makeAimId, MAX_AIMS_PER_GROUP, MAX_GROUPS, prioritizeOldGroups, renameAim, renameGroup, reorderAim, reorderGroup, setGoalCompletionDraft, unarchiveSelected, uncompleteArchivedSelected, uncompleteSelected, updateAimNote, updateArchivedNote } from './aimBoard';
 import type { AimBoardState, AimGroup, ArchivedAimItem } from './aimBoard';
 import { boundedAimOffset, orderedAimLayouts, previewAimTops, previewIndex, proposedAimIndex } from './aimDrag';
 import type { AimDragLayout } from './aimDrag';
 import type { EffectiveTheme, ThemeColors } from './theme';
 import { fonts } from './typography';
 
-type Editor = { kind: 'addAim'; groupId: string } | { kind: 'addGroup' } | { kind: 'title'; id: string } | { kind: 'aim'; id: string };
+type Editor = { kind: 'title' | 'aim'; id: string; isNew: boolean };
 type NoteEdit = { id: string; archived: boolean; original: string; latest: string };
-type InlineEdit = { kind: 'title' | 'aim'; id: string; value: string };
+type InlineEdit = { kind: 'title' | 'aim'; id: string; value: string; isNew: boolean; groupId?: string; originalEmptyCompleted?: boolean };
 type AimDrag = { groupId: string; aimId: string; startY: number; sourceY: number; layouts: AimDragLayout[]; listHeight: number; toIndex: number };
 type GroupDrag = { groupId: string; startY: number; layouts: AimDragLayout[]; toIndex: number };
 type AimDragPress = Pick<PressableProps, 'onLongPress' | 'onPressMove' | 'onPressOut'>;
+type OrganizeAction = 'delete' | 'complete' | 'archive';
+type ConfirmableOrganizeAction = Exclude<OrganizeAction, 'complete'>;
+export type OrganizerLabelVisibility = Record<OrganizeAction, boolean>;
+export type OrganizerProcessLabelVisibility = { cancel: boolean; save: boolean };
+export type OrganizerIconEnlargement = Record<OrganizeAction | 'organize', boolean>;
 const AIM_DRAG_RETENTION = { top: 1000, bottom: 1000, left: 80, right: 80 };
-const ORGANIZE_ROW_HEIGHT = 60;
-const ORGANIZE_SELECTION_HEIGHT = 92;
+const ORGANIZER_MENU_HEIGHT = 74;
+const ORGANIZER_TOGGLE_HEIGHT_WITH_LABEL = 56;
+const ORGANIZER_TOGGLE_HEIGHT_WITHOUT_LABEL = 44;
 
 function PressFeedback({ children, onPress, label, style, disabled = false, selected = false }: { children: ReactNode; onPress: () => void; label: string; style?: StyleProp<ViewStyle>; disabled?: boolean; selected?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled, selected }} disabled={disabled} onPress={onPress} style={({ pressed }) => [style, disabled && { opacity: 0.45 }, pressed && { opacity: 0.8, transform: [{ scale: 0.98 }] }]}>{children}</Pressable>;
 }
 
-function ToolbarCircleButton({ icon, label, onPress, color, foreground, disabled = false, selected = false, styles }: { icon: keyof typeof Feather.glyphMap; label: string; onPress: () => void; color: string; foreground: string; disabled?: boolean; selected?: boolean; styles: ReturnType<typeof createStyles> }) {
-  return <PressFeedback label={label} onPress={onPress} disabled={disabled} selected={selected} style={styles.toolbarIconButton}>
-    <View style={[styles.toolbarIconCircle, { borderColor: color }, selected && { backgroundColor: color }]}>
-      <Feather name={icon} size={18} color={selected ? foreground : color} accessible={false} />
-    </View>
-  </PressFeedback>;
-}
-
-function SelectionCircle({ selected, partial = false, disabled = false, group = false, label, onPress, dragPress, colors }: { selected: boolean; partial?: boolean; disabled?: boolean; group?: boolean; label: string; onPress: () => void; dragPress?: AimDragPress; colors: ThemeColors }) {
+function SelectionCircle({ selected, partial = false, disabled = false, group = false, label, onPress, dragPress, colors, action }: { selected: boolean; partial?: boolean; disabled?: boolean; group?: boolean; label: string; onPress: () => void; dragPress?: AimDragPress; colors: ThemeColors; action: OrganizeAction }) {
+  const selectionColor = action === 'delete' ? colors.danger : action === 'complete' ? colors.sage : colors.archiveAccent;
+  const foreground = action === 'delete' ? colors.dangerForeground : action === 'complete' ? colors.sageForeground : colors.archiveAccentForeground;
   return <Pressable accessibilityRole="checkbox" accessibilityLabel={label} accessibilityState={{ checked: partial ? 'mixed' : selected, disabled }} disabled={disabled} onPress={onPress} onLongPress={dragPress?.onLongPress} onPressMove={dragPress?.onPressMove} onPressOut={dragPress?.onPressOut} delayLongPress={450} pressRetentionOffset={dragPress ? AIM_DRAG_RETENTION : undefined} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center', opacity: disabled ? 0.55 : 1 }}>
-    <View style={{ width: 22, height: 22, borderRadius: group ? 6 : 11, borderWidth: 1.5, borderColor: selected || partial ? colors.accent : colors.textMuted, backgroundColor: selected ? colors.accent : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
-      {selected ? <Feather name="check" size={14} color={colors.accentForeground} /> : partial ? <View style={{ width: 9, height: 2, borderRadius: 1, backgroundColor: colors.accent }} /> : null}
+    <View style={{ width: 22, height: 22, borderRadius: group ? 6 : 11, borderWidth: 1.5, borderColor: selected || partial ? selectionColor : colors.textMuted, backgroundColor: selected ? selectionColor : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
+      {selected ? <Feather name="check" size={14} color={foreground} /> : partial ? <View style={{ width: 9, height: 2, borderRadius: 1, backgroundColor: selectionColor }} /> : null}
     </View>
   </Pressable>;
 }
 
-function OrganizeRevealIcon({ color }: { color: string }) {
-  return <View accessible={false} style={{ width: 20, height: 20 }}>
-    {[3, 8.5, 14].map((left) => <View key={left} style={{ position: 'absolute', left, top: 8.5, width: 3, height: 3, borderRadius: 1.5, backgroundColor: color }} />)}
+function goalIsCompleted(goal: { aims: readonly { completed: boolean }[]; emptyCompleted?: boolean }): boolean {
+  return goal.aims.length === 0 ? goal.emptyCompleted === true : goal.aims.every((aim) => aim.completed);
+}
+
+function CompletedGoalIndicator({ title, colors, style }: { title: string; colors: ThemeColors; style: StyleProp<ViewStyle> }) {
+  return <View accessible accessibilityRole="image" accessibilityLabel={`Completed goal: ${title}`} pointerEvents="none" style={style}>
+    <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: colors.sage, backgroundColor: colors.sage, alignItems: 'center', justifyContent: 'center' }}>
+      <Feather name="check" size={14} color={colors.sageForeground} accessible={false} />
+    </View>
   </View>;
 }
 
-function SelectionToolbar({ enabled, canSelect = true, selectedCount, totalCount, itemCount, onToggle, onSelectAll, onCompleteAll, canCompleteAll, onArchiveAll, canArchiveAll = false, onUndo, onRedo, canUndo, canRedo, showArchiveAction = true, colors, styles }: { enabled: boolean; canSelect?: boolean; selectedCount: number; totalCount: number; itemCount: number; onToggle: () => void; onSelectAll: () => void; onCompleteAll: () => void; canCompleteAll: boolean; onArchiveAll?: () => void; canArchiveAll?: boolean; onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean; showArchiveAction?: boolean; colors: ThemeColors; styles: ReturnType<typeof createStyles> }) {
-  const allSelected = totalCount > 0 && selectedCount === totalCount;
-  const selectionEnabled = enabled && canSelect;
-  return <View style={styles.selectionToolbarWrap}>
-    <View style={styles.selectionToolbar}>
-    <View style={styles.toolbarActionRow}>
-      <View style={styles.organizeControl}>
-        <Text numberOfLines={1} style={styles.organizeLabel}>Organize</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel={canSelect ? selectionEnabled ? 'Finish selecting aims' : 'Start selecting aims' : 'No groups to select'} accessibilityState={{ selected: selectionEnabled, disabled: !canSelect }} disabled={!canSelect} onPress={onToggle} style={({ pressed }) => [styles.toolbarIconButton, !canSelect && styles.selectionToggleDisabled, pressed && styles.selectionTogglePressed]}>
-          <View style={[styles.toolbarIconCircle, { borderColor: selectionEnabled ? colors.accent : colors.textMuted }]}>
-            <MaterialCommunityIcons name="format-list-checks" size={20} color={selectionEnabled ? colors.accent : colors.textMuted} accessible={false} />
-          </View>
-        </Pressable>
-      </View>
-      <ToolbarCircleButton icon="check" label={canCompleteAll || itemCount === 0 ? 'Mark all complete' : 'Mark all incomplete'} onPress={onCompleteAll} disabled={selectionEnabled || itemCount === 0} selected={itemCount > 0 && !canCompleteAll} color={colors.sage} foreground={colors.sageForeground} styles={styles} />
-      {showArchiveAction && <ToolbarCircleButton icon="archive" label="Archive all aims" onPress={onArchiveAll ?? (() => undefined)} disabled={selectionEnabled || !canArchiveAll} color={canArchiveAll ? colors.archiveAccent : colors.textMuted} foreground={colors.archiveAccentForeground} styles={styles} />}
-      <ToolbarCircleButton icon="rotate-ccw" label="Undo" onPress={onUndo} disabled={selectionEnabled || !canUndo} color={canUndo ? colors.text : colors.textMuted} foreground={colors.background} styles={styles} />
-      <ToolbarCircleButton icon="rotate-cw" label="Redo" onPress={onRedo} disabled={selectionEnabled || !canRedo} color={canRedo ? colors.text : colors.textMuted} foreground={colors.background} styles={styles} />
-    </View>
-    </View>
-    {selectionEnabled && <PressFeedback label={allSelected ? 'Deselect all aims' : 'Select all aims'} onPress={onSelectAll} disabled={totalCount === 0} style={styles.selectAllButton}>
-      <Text style={styles.selectAllText}>{allSelected ? 'Deselect all' : 'Select all'}</Text>
-    </PressFeedback>}
-  </View>;
-}
-
-function RenameLabel({ accessibilityLabel, accessibilityHint, onPress, onPressIn, onLongPress, onPressMove, onPressOut, children, style, pressStyle, pressedStyle }: { accessibilityLabel: string; accessibilityHint?: string; onPress: () => void; onPressIn?: PressableProps['onPressIn']; onLongPress?: PressableProps['onLongPress']; onPressMove?: PressableProps['onPressMove']; onPressOut?: PressableProps['onPressOut']; children: ReactNode; style?: StyleProp<ViewStyle>; pressStyle: StyleProp<ViewStyle>; pressedStyle: StyleProp<ViewStyle> }) {
+function RenameLabel({ accessibilityLabel, accessibilityHint, onPress, onPressIn, onLongPress, onPressMove, onPressOut, children, style, pressStyle, pressedStyle, disabled = false }: { accessibilityLabel: string; accessibilityHint?: string; onPress: () => void; onPressIn?: PressableProps['onPressIn']; onLongPress?: PressableProps['onLongPress']; onPressMove?: PressableProps['onPressMove']; onPressOut?: PressableProps['onPressOut']; children: ReactNode; style?: StyleProp<ViewStyle>; pressStyle: StyleProp<ViewStyle>; pressedStyle: StyleProp<ViewStyle>; disabled?: boolean }) {
   return <View style={style}>
-    <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} onPress={onPress} onPressIn={onPressIn} onLongPress={onLongPress} onPressMove={onPressMove} onPressOut={onPressOut} delayLongPress={450} pressRetentionOffset={onLongPress ? AIM_DRAG_RETENTION : undefined} style={({ pressed }) => [pressStyle, pressed && pressedStyle]}>{children}</Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={accessibilityHint} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} onPressIn={onPressIn} onLongPress={onLongPress} onPressMove={onPressMove} onPressOut={onPressOut} delayLongPress={450} pressRetentionOffset={onLongPress ? AIM_DRAG_RETENTION : undefined} style={({ pressed }) => [pressStyle, pressed && pressedStyle]}>{children}</Pressable>
   </View>;
 }
 
@@ -111,56 +90,112 @@ function formatArchiveDate(key: string): string {
   return new Date(year, month - 1, day, 12).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
-function RevealableToolbar({ top, toolbar, selecting, onCancelSelection, toggleTop = 0, colors, styles, children }: { top: ReactNode | ((toggle: ReactNode) => ReactNode); toolbar: ReactNode; selecting: boolean; onCancelSelection: () => void; toggleTop?: number; colors: ThemeColors; styles: ReturnType<typeof createStyles>; children: ReactNode }) {
-  const [expanded, setExpanded] = useState(false);
-  const [revealHeight] = useState(() => new Animated.Value(0));
-  const targetHeight = selecting ? ORGANIZE_SELECTION_HEIGHT : ORGANIZE_ROW_HEIGHT;
-  const previousTargetHeight = useRef(targetHeight);
-
-  const snapTo = useCallback((next: boolean) => {
-    setExpanded(next);
-    Animated.timing(revealHeight, { toValue: next ? targetHeight : 0, duration: 160, useNativeDriver: false }).start();
-  }, [revealHeight, targetHeight]);
-
-  useEffect(() => {
-    const targetChanged = previousTargetHeight.current !== targetHeight;
-    previousTargetHeight.current = targetHeight;
-    if (expanded && targetChanged) Animated.timing(revealHeight, { toValue: targetHeight, duration: 160, useNativeDriver: false }).start();
-  }, [expanded, revealHeight, targetHeight]);
-  useEffect(() => () => revealHeight.stopAnimation(), [revealHeight]);
-  const inlineToggle = typeof top === 'function';
-  const toggle = <Pressable accessibilityRole="button" accessibilityLabel={selecting ? 'Cancel selection' : expanded ? 'Collapse Organize actions' : 'Reveal Organize actions'} accessibilityState={{ expanded }} onPress={() => { if (selecting) { onCancelSelection(); snapTo(false); } else snapTo(!expanded); }} style={[inlineToggle ? styles.organizeHeaderToggleInline : styles.organizeHeaderToggle, !inlineToggle && { top: toggleTop }]}>
-    <View style={[styles.organizeHeaderToggleCircle, { borderColor: expanded ? colors.accent : colors.iconBorder }]}>
-      <OrganizeRevealIcon color={expanded ? colors.accent : colors.textMuted} />
-    </View>
-  </Pressable>;
-
+function SelectableContent({ top, styles, children }: { top: ReactNode; styles: ReturnType<typeof createStyles>; children: ReactNode }) {
   return <View style={styles.organizeScreenContent}>
-    {inlineToggle ? top(toggle) : top}
-    {!inlineToggle && toggle}
-    <Animated.View accessibilityElementsHidden={!expanded} importantForAccessibility={expanded ? 'auto' : 'no-hide-descendants'} pointerEvents={expanded ? 'auto' : 'none'} style={[styles.organizeRevealContent, { height: revealHeight }]}>{toolbar}</Animated.View>
+    {top}
     <View style={styles.organizeListTouchArea}>
       {children}
     </View>
   </View>;
 }
 
-function GroupCompletionSquare({ title, completed, onPress, colors, styles }: { title: string; completed: boolean; onPress: () => void; colors: ThemeColors; styles: ReturnType<typeof createStyles> }) {
-  return <Pressable accessibilityRole="checkbox" accessibilityLabel={`Mark ${title} ${completed ? 'incomplete' : 'complete'}`} accessibilityState={{ checked: completed }} onPress={onPress} style={({ pressed }) => [styles.groupCompletedButton, pressed && styles.groupCompletedPressed]}>
-    <View style={[styles.groupCompletionSquare, completed ? styles.groupCompletedCircleDone : styles.groupCompletedCirclePending]}>{completed && <Feather name="check" size={14} color={colors.sageForeground} accessible={false} />}</View>
-  </Pressable>;
+function OrganizerActionIcon({ action, archived, showLabel, enlargeWhenUnlabeled, color }: { action: OrganizeAction; archived: boolean; showLabel: boolean; enlargeWhenUnlabeled: boolean; color: string }) {
+  const size = !showLabel && enlargeWhenUnlabeled ? 30 : 24;
+  return action === 'archive'
+    ? <MaterialCommunityIcons name={archived ? 'folder-arrow-up-outline' : 'folder-arrow-down-outline'} size={size} color={color} accessible={false} />
+    : <Feather name={action === 'delete' ? 'trash-2' : 'check'} size={size} color={color} accessible={false} />;
 }
 
-function GroupCompletedButton({ title, completed, label, onPress, colors, styles }: { title: string; completed: boolean; label?: string; onPress: () => void; colors: ThemeColors; styles: ReturnType<typeof createStyles> }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label ?? `Mark ${title} ${completed ? 'incomplete' : 'complete'}`} onPress={onPress} style={({ pressed }) => [styles.groupCompletedButton, pressed && styles.groupCompletedPressed]}>
-    <View style={[styles.groupCompletedCircle, completed ? styles.groupCompletedCircleDone : styles.groupCompletedCirclePending]}><Feather name="check" size={14} color={completed ? colors.sageForeground : colors.text} accessible={false} /></View>
-  </Pressable>;
+function OrganizeActions({ archived, onChoose, showLabels, enlargeWhenUnlabeled, disabled, colors, styles }: { archived: boolean; onChoose: (action: OrganizeAction) => void; showLabels: OrganizerLabelVisibility; enlargeWhenUnlabeled: OrganizerIconEnlargement; disabled: boolean; colors: ThemeColors; styles: ReturnType<typeof createStyles> }) {
+  return <View style={styles.organizeActions}>
+    {(['delete', 'complete', 'archive'] as const).map((option) => {
+      const color = option === 'delete' ? colors.danger : option === 'complete' ? colors.sage : colors.archiveAccent;
+      const title = option === 'delete' ? 'Delete' : option === 'complete' ? 'Complete' : archived ? 'Unarchive' : 'Put in Archive';
+      const showLabel = showLabels[option];
+      return <PressFeedback key={option} label={`Choose ${title.toLowerCase()} action`} onPress={() => onChoose(option)} disabled={disabled} style={[styles.organizeActionButton, !showLabel && styles.organizeActionButtonWithoutLabel]}>
+        {showLabel && <Text style={styles.organizeActionHeading}>{title}</Text>}
+        <View style={styles.organizeActionIcon}>
+          <OrganizerActionIcon action={option} archived={archived} showLabel={showLabel} enlargeWhenUnlabeled={enlargeWhenUnlabeled[option]} color={color} />
+        </View>
+      </PressFeedback>;
+    })}
+  </View>;
 }
 
-function AimCompletionCircle({ text, completed, onPress, colors }: { text: string; completed: boolean; onPress: () => void; colors: ThemeColors }) {
-  return <Pressable accessibilityRole="checkbox" accessibilityLabel={`Mark ${text} ${completed ? 'incomplete' : 'complete'}`} accessibilityState={{ checked: completed }} onPress={onPress} style={{ width: 44, height: 44, alignItems: 'center', justifyContent: 'center' }}>
-    <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 1.5, borderColor: completed ? colors.sage : colors.textMuted, backgroundColor: completed ? colors.sage : 'transparent', alignItems: 'center', justifyContent: 'center' }}>{completed && <Feather name="check" size={14} color={colors.sageForeground} accessible={false} />}</View>
-  </Pressable>;
+function OrganizerDock({ open, canOpen, showLabel, enlargeWhenUnlabeled, onToggle, onClosed, colors, children, styles }: { open: boolean; canOpen: boolean; showLabel: boolean; enlargeWhenUnlabeled: boolean; onToggle: () => void; onClosed: () => void; colors: ThemeColors; children: ReactNode; styles: ReturnType<typeof createStyles> }) {
+  const toggleHeight = showLabel ? ORGANIZER_TOGGLE_HEIGHT_WITH_LABEL : ORGANIZER_TOGGLE_HEIGHT_WITHOUT_LABEL;
+  const [translateY] = useState(() => new Animated.Value(open ? 0 : ORGANIZER_MENU_HEIGHT));
+  const hasOpened = useRef(open);
+  useEffect(() => {
+    if (!open && !hasOpened.current) return;
+    if (open) hasOpened.current = true;
+    const animation = Animated.timing(translateY, { toValue: open ? 0 : ORGANIZER_MENU_HEIGHT, duration: open ? 180 : 160, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+    animation.start(({ finished }) => {
+      if (finished && !open) onClosed();
+    });
+    return () => animation.stop();
+  }, [open, onClosed, translateY]);
+  return <View pointerEvents="box-none" style={[styles.organizerDock, { height: ORGANIZER_MENU_HEIGHT + toggleHeight }]}>
+    <Animated.View pointerEvents="box-none" style={[styles.organizerDockMotion, { transform: [{ translateY }] }]}>
+      <View style={[styles.organizerToggleFooter, { height: toggleHeight }]}>
+        <Pressable accessibilityRole="button" accessibilityLabel={canOpen ? open ? 'Hide Organize menu' : 'Show Organize menu' : 'No items to organize'} accessibilityState={{ expanded: open, disabled: !canOpen }} disabled={!canOpen} onPress={onToggle} style={({ pressed }) => [styles.organizerToggleButton, !canOpen && styles.organizerToggleDisabled, pressed && styles.organizerTogglePressed]}>
+          {showLabel && <Text style={styles.organizerToggleLabel}>Organize</Text>}
+          <View style={styles.organizerToggleIcon}>
+            <Feather name={open ? 'chevron-down' : 'chevron-up'} size={!showLabel && enlargeWhenUnlabeled ? 30 : 23} color={open ? colors.accent : colors.textMuted} accessible={false} />
+          </View>
+        </Pressable>
+      </View>
+      <View pointerEvents={open ? 'auto' : 'none'} accessibilityElementsHidden={!open} importantForAccessibility={open ? 'auto' : 'no-hide-descendants'} style={styles.organizerDockPanel}>{children}</View>
+    </Animated.View>
+  </View>;
+}
+
+function ProcessActionButton({ action, archived, showActionLabel, showLabels, enlargeWhenUnlabeled, count, disabled, blocked = false, saveOnlyUncomplete = false, onPress, onSave, onCancel, colors, styles }: { action: OrganizeAction; archived: boolean; showActionLabel: boolean; showLabels: OrganizerProcessLabelVisibility; enlargeWhenUnlabeled: boolean; count: number; disabled: boolean; blocked?: boolean; saveOnlyUncomplete?: boolean; onPress: () => void; onSave: () => void; onCancel: () => void; colors: ThemeColors; styles: ReturnType<typeof createStyles> }) {
+  const color = action === 'delete' ? colors.danger : action === 'complete' ? colors.sage : colors.archiveAccent;
+  const title = action === 'delete' ? 'Delete' : action === 'complete' ? 'Mark complete' : archived ? 'Unarchive' : 'Put in Archive';
+  const saveColor = disabled ? colors.textMuted : saveOnlyUncomplete ? colors.danger : color;
+  const iconSize = enlargeWhenUnlabeled ? 30 : 24;
+  const saveLabel = disabled
+    ? 'Select a completion change before saving'
+    : `Save ${count} completion change${count === 1 ? '' : 's'}`;
+  const actionLabel = blocked
+    ? `Cannot unarchive: maximum ${MAX_GROUPS} active goals`
+    : disabled
+      ? `Select items to ${title.toLowerCase()}`
+      : `Review ${title.toLowerCase()} for ${count} selected item${count === 1 ? '' : 's'}`;
+  return <View style={styles.processActionRow}>
+    <PressFeedback label={`Cancel ${title.toLowerCase()} action`} onPress={onCancel} style={styles.cancelProcessButton}>
+      {showLabels.cancel && <Text style={styles.processActionLabel}>Cancel</Text>}
+      <Feather name="x" size={showLabels.cancel ? 24 : iconSize} color={colors.danger} accessible={false} />
+    </PressFeedback>
+    {action === 'complete'
+      ? <Text style={[styles.processActionTitle, { color: disabled ? colors.textMuted : color }]}>{title}</Text>
+      : <PressFeedback label={actionLabel} onPress={onPress} disabled={disabled} style={styles.processTarget}>
+          <OrganizerActionIcon action={action} archived={archived} showLabel={showActionLabel} enlargeWhenUnlabeled={enlargeWhenUnlabeled} color={disabled ? colors.textMuted : color} />
+        </PressFeedback>}
+    {action === 'complete' && <PressFeedback label={saveLabel} onPress={onSave} disabled={disabled} style={styles.saveProcessButton}>
+      {showLabels.save && <Text style={[styles.processActionLabel, { color: saveColor }]}>Save</Text>}
+      <MaterialCommunityIcons name="content-save-outline" size={showLabels.save ? 24 : iconSize} color={saveColor} accessible={false} />
+    </PressFeedback>}
+  </View>;
+}
+
+function ConfirmOrganizerAction({ action, archived, onCancel, onConfirm, colors, styles }: { action: ConfirmableOrganizeAction | null; archived: boolean; onCancel: () => void; onConfirm: () => void; colors: ThemeColors; styles: ReturnType<typeof createStyles> }) {
+  const title = action === 'delete' ? 'Delete selected items?' : archived ? 'Unarchive selected goals?' : 'Put selected goals in Archive?';
+  const confirmLabel = action === 'delete' ? 'Delete' : archived ? 'Unarchive' : 'Put in Archive';
+  return <Modal visible={action !== null} transparent animationType="fade" onRequestClose={onCancel}>
+    <View style={styles.confirmOverlay}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Dismiss confirmation" onPress={onCancel} style={StyleSheet.absoluteFill} />
+      <View style={styles.confirmCard}>
+        <Text style={styles.confirmTitle}>{title}</Text>
+        {action === 'delete' && <Text style={styles.confirmCopy}>This can&apos;t be undone.</Text>}
+        <View style={styles.confirmActions}>
+          <PressFeedback label="Cancel" onPress={onCancel} style={styles.confirmButton}><Text style={styles.confirmCancelText}>Cancel</Text></PressFeedback>
+          <PressFeedback label={confirmLabel} onPress={onConfirm} style={styles.confirmButton}><Text style={[styles.confirmActionText, { color: action === 'delete' ? colors.danger : colors.archiveAccent }]}>{confirmLabel}</Text></PressFeedback>
+        </View>
+      </View>
+    </View>
+  </Modal>;
 }
 
 function formatOldAimDate(key: string): string {
@@ -168,37 +203,56 @@ function formatOldAimDate(key: string): string {
   return new Date(year, month - 1, day, 12).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function archiveSections(archive: AimBoardState['archive']): { dateKey: string; titles: { id: string; title: string; order: number; aims: ArchivedAimItem[]; emptyArchiveId?: string; emptyCompleted?: boolean }[] }[] {
-  const dates = new Map<string, Map<string, { id: string; title: string; order: number; aims: ArchivedAimItem[]; emptyArchiveId?: string; emptyCompleted?: boolean }>>();
+type ArchivedGoalDisplay = { key: string; id: string; title: string; order: number; aims: ArchivedAimItem[]; archiveIds: string[]; emptyArchiveId?: string; emptyCompleted?: boolean };
+type ArchivedHeadingDisplay = { key: string; title: string; latestArchivedAt: string; goals: ArchivedGoalDisplay[] };
+
+function archiveSections(archive: AimBoardState['archive']): { dateKey: string; headings: ArchivedHeadingDisplay[] }[] {
+  const dates = new Map<string, Map<string, { key: string; title: string; latestArchivedAt: string; goals: Map<string, ArchivedGoalDisplay> }>>();
   for (const group of archive) {
-    const titles = dates.get(group.originalDateKey) ?? new Map<string, { id: string; title: string; order: number; aims: ArchivedAimItem[]; emptyArchiveId?: string; emptyCompleted?: boolean }>();
-    const key = group.aims.length ? `${group.originalGroupId}:${group.title}` : `empty:${group.id}`;
-    const existing = titles.get(key);
-    titles.set(key, { id: group.aims.length ? group.originalGroupId : group.id, title: group.title, order: group.originalGroupOrder, aims: [...(existing?.aims ?? []), ...group.aims], emptyArchiveId: group.aims.length ? undefined : group.id, emptyCompleted: group.aims.length === 0 && group.emptyCompleted === true });
-    dates.set(group.originalDateKey, titles);
+    const headings = dates.get(group.originalDateKey) ?? new Map();
+    const headingKey = JSON.stringify([group.originalDateKey, group.archiveHeading]);
+    const heading = headings.get(headingKey) ?? { key: headingKey, title: group.archiveHeading, latestArchivedAt: group.archivedAt, goals: new Map<string, ArchivedGoalDisplay>() };
+    heading.goals.set(group.id, { key: JSON.stringify([headingKey, group.id]), id: group.id, title: group.title, order: group.originalGroupOrder, aims: group.aims, archiveIds: [group.id], emptyArchiveId: group.aims.length ? undefined : group.id, emptyCompleted: group.aims.length === 0 && group.emptyCompleted === true });
+    if (group.archivedAt > heading.latestArchivedAt) heading.latestArchivedAt = group.archivedAt;
+    headings.set(headingKey, heading);
+    dates.set(group.originalDateKey, headings);
   }
-  return [...dates.entries()].sort(([a], [b]) => b.localeCompare(a)).map(([dateKey, titles]) => ({
+  return [...dates.entries()].sort(([a], [b]) => b.localeCompare(a)).map(([dateKey, headings]) => ({
     dateKey,
-    titles: [...titles.values()].map((group) => ({ ...group, aims: group.aims.sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt)) })).sort((a, b) => a.order - b.order),
+    headings: [...headings.values()].map((heading) => ({ key: heading.key, title: heading.title, latestArchivedAt: heading.latestArchivedAt, goals: [...heading.goals.values()].map((group) => ({ ...group, aims: group.aims.sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt)) })).sort((a, b) => a.order - b.order) })).sort((a, b) => b.latestArchivedAt.localeCompare(a.latestArchivedAt)),
   }));
 }
 
-export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUndo, canRedo, colors, effectiveTheme, scrollContentStyle }: { header: (organizeToggle: ReactNode) => ReactNode; state: AimBoardState; onChange: (update: (current: AimBoardState) => AimBoardState) => void; onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean; colors: ThemeColors; effectiveTheme: EffectiveTheme; scrollContentStyle: StyleProp<ViewStyle> }) {
-  const styles = useMemo(() => createStyles(colors, effectiveTheme), [colors, effectiveTheme]);
+export function AimBoardScreen({ header, archiveView = false, onCloseArchive, onSelectionModeChange, state, onChange, colors, effectiveTheme, scrollContentStyle, showArchiveDates, showRelatedTags, showOrganizeHeader, showSelectHeader, showOrganizerLabels, showOrganizerProcessLabels, largeUnlabeledOrganizerIcons, headingEditing = false }: { header?: ReactNode; archiveView?: boolean; onCloseArchive?: () => void; onSelectionModeChange?: (active: boolean) => void; state: AimBoardState; onChange: (update: (current: AimBoardState) => AimBoardState) => AimBoardState; colors: ThemeColors; effectiveTheme: EffectiveTheme; scrollContentStyle: StyleProp<ViewStyle>; showArchiveDates: boolean; showRelatedTags: boolean; showOrganizeHeader: boolean; showSelectHeader: boolean; showOrganizerLabels: OrganizerLabelVisibility; showOrganizerProcessLabels: OrganizerProcessLabelVisibility; largeUnlabeledOrganizerIcons: OrganizerIconEnlargement; headingEditing?: boolean }) {
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(() => new Set());
   const [selectedEmptyGroupIds, setSelectedEmptyGroupIds] = useState<Set<string>>(() => new Set());
+  const [activeCompletionDraft, setActiveCompletionDraft] = useState<Set<string>>(() => new Set());
   const [selectedArchived, setSelectedArchived] = useState<Set<string>>(() => new Set());
+  const [selectedArchivedGoalKeys, setSelectedArchivedGoalKeys] = useState<Set<string>>(() => new Set());
   const [selectedArchivedEmptyGroupIds, setSelectedArchivedEmptyGroupIds] = useState<Set<string>>(() => new Set());
-  const [selectionMode, setSelectionMode] = useState(false);
-  const [archiveSelectionMode, setArchiveSelectionMode] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveCompletionDraft, setArchiveCompletionDraft] = useState<Set<string>>(() => new Set());
+  const [organizeOpen, setOrganizeOpen] = useState(false);
+  const [activeAction, setActiveAction] = useState<OrganizeAction | null>(null);
+  const [archiveOrganizeOpen, setArchiveOrganizeOpen] = useState(false);
+  const [archiveAction, setArchiveAction] = useState<OrganizeAction | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<ConfirmableOrganizeAction | null>(null);
+  const selectionMode = organizeOpen && activeAction !== null;
+  const archiveSelectionMode = archiveOrganizeOpen && archiveAction !== null;
+  const editingLocked = selectionMode || archiveSelectionMode;
+  useEffect(() => { onSelectionModeChange?.(selectionMode); }, [onSelectionModeChange, selectionMode]);
+  const finishActiveOrganizeClose = useCallback(() => setActiveAction(null), []);
+  const finishArchiveOrganizeClose = useCallback(() => setArchiveAction(null), []);
+  const [archiveTitleDraft, setArchiveTitleDraft] = useState<string | null>(null);
+  const archiveTitleEditRef = useRef<string | null>(null);
+  const [collapsedArchiveHeadings, setCollapsedArchiveHeadings] = useState<Set<string>>(() => new Set());
+  const [collapsedArchivedGoals, setCollapsedArchivedGoals] = useState<Set<string>>(() => new Set());
   const [editor, setEditor] = useState<Editor | null>(null);
   const [value, setValue] = useState('');
-  const [newAimNote, setNewAimNote] = useState('');
-  const [error, setError] = useState('');
-  const newAimNoteInput = useRef<TextInput>(null);
+  const [goalLimitError, setGoalLimitError] = useState(false);
+  const [goalLimitShake] = useState(() => new Animated.Value(0));
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
-  const [completionGroupId, setCompletionGroupId] = useState<string | null>(null);
   const [aimPressHeld, setAimPressHeld] = useState(false);
   const [dragging, setDragging] = useState<AimDrag | null>(null);
   const dragRef = useRef<AimDrag | null>(null);
@@ -213,29 +267,58 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
   const noteEditRef = useRef<NoteEdit | null>(null);
   const inlineEditRef = useRef<InlineEdit | null>(null);
+  const textEditing = editor !== null || focusedNoteId !== null || headingEditing || archiveTitleDraft !== null;
   const groups = useMemo(() => prioritizeOldGroups(state.active.groups), [state.active.groups]);
-  const hasArchivedItems = state.archive.length > 0;
+  const hasCompletedActiveGoal = useMemo(() => groups.some(goalIsCompleted), [groups]);
+  const organizerToggleHeight = showOrganizeHeader ? ORGANIZER_TOGGLE_HEIGHT_WITH_LABEL : ORGANIZER_TOGGLE_HEIGHT_WITHOUT_LABEL;
   const activeIds = useMemo(() => new Set(groups.flatMap((group) => group.aims.map((aim) => aim.id))), [groups]);
   const emptyGroupIds = useMemo(() => new Set(groups.filter((group) => group.aims.length === 0).map((group) => group.id)), [groups]);
   const sections = useMemo(() => archiveSections(state.archive), [state.archive]);
+  const hasCompletedArchivedGoal = useMemo(() => sections.some((section) => section.headings.some((heading) => heading.goals.some(goalIsCompleted))), [sections]);
+  const firstVisibleArchiveGoalKey = useMemo(() => {
+    for (const section of sections) {
+      for (const heading of section.headings) {
+        if (!collapsedArchiveHeadings.has(heading.key) && heading.goals.length > 0) return heading.goals[0].key;
+      }
+    }
+    return null;
+  }, [sections, collapsedArchiveHeadings]);
   const selectedActive = useMemo(() => new Set([...selected].filter((id) => activeIds.has(id))), [selected, activeIds]);
+  const selectedGoals = useMemo(() => new Set([...selectedGroupIds].filter((id) => groups.some((group) => group.id === id && group.aims.length > 0))), [selectedGroupIds, groups]);
   const selectedEmptyGroups = useMemo(() => new Set([...selectedEmptyGroupIds].filter((id) => emptyGroupIds.has(id))), [emptyGroupIds, selectedEmptyGroupIds]);
-  const hasActiveSelection = selectedActive.size > 0 || selectedEmptyGroups.size > 0;
+  const activeCompletionChanges = useMemo(() => completionDraftChanges(groups, activeCompletionDraft), [groups, activeCompletionDraft]);
+  const activeNewCompletionCount = activeCompletionChanges.completeAimIds.size + activeCompletionChanges.completeEmptyGroupIds.size;
+  const activeCompletionChangeCount = activeNewCompletionCount + activeCompletionChanges.uncompleteAimIds.size + activeCompletionChanges.uncompleteEmptyGroupIds.size;
+  const canArchiveSelection = selectedGoals.size > 0 || selectedEmptyGroups.size > 0;
   const archivedIds = useMemo(() => new Set(state.archive.flatMap((group) => group.aims.map((aim) => aim.id))), [state.archive]);
   const archivedEmptyGroupIds = useMemo(() => new Set(state.archive.filter((group) => group.aims.length === 0).map((group) => group.id)), [state.archive]);
   const selectedArchiveActive = useMemo(() => new Set([...selectedArchived].filter((id) => archivedIds.has(id))), [selectedArchived, archivedIds]);
   const selectedArchiveEmptyGroups = useMemo(() => new Set([...selectedArchivedEmptyGroupIds].filter((id) => archivedEmptyGroupIds.has(id))), [selectedArchivedEmptyGroupIds, archivedEmptyGroupIds]);
-  const hasArchiveSelection = selectedArchiveActive.size > 0 || selectedArchiveEmptyGroups.size > 0;
-  const selectedActiveAllCompleted = selectedActive.size > 0 && groups.flatMap((group) => group.aims).filter((aim) => selectedActive.has(aim.id)).every((aim) => aim.completed);
-  const selectedArchiveAllCompleted = selectedArchiveActive.size > 0 && state.archive.flatMap((group) => group.aims).filter((aim) => selectedArchiveActive.has(aim.id)).every((aim) => aim.completed);
-  const activeAllCompleted = activeIds.size + emptyGroupIds.size > 0 && groups.every((group) => group.aims.length === 0 ? group.emptyCompleted === true : group.aims.every((aim) => aim.completed));
-  const archivedAllCompleted = archivedIds.size + archivedEmptyGroupIds.size > 0 && state.archive.every((group) => group.aims.length === 0 ? group.emptyCompleted === true : group.aims.every((aim) => aim.completed));
-  const closeArchive = useCallback(() => { Keyboard.dismiss(); setSelectedArchived(new Set()); setSelectedArchivedEmptyGroupIds(new Set()); setArchiveSelectionMode(false); setArchiveOpen(false); }, []);
+  const archiveCompletionChanges = useMemo(() => completionDraftChanges(state.archive, archiveCompletionDraft), [state.archive, archiveCompletionDraft]);
+  const archiveNewCompletionCount = archiveCompletionChanges.completeAimIds.size + archiveCompletionChanges.completeEmptyGroupIds.size;
+  const archiveCompletionChangeCount = archiveNewCompletionCount + archiveCompletionChanges.uncompleteAimIds.size + archiveCompletionChanges.uncompleteEmptyGroupIds.size;
+  const selectedArchivedGoals = useMemo(() => sections.flatMap((section) => section.headings.flatMap((heading) => heading.goals)).filter((goal) => selectedArchivedGoalKeys.has(goal.key)), [sections, selectedArchivedGoalKeys]);
+  const hasUnarchiveSelection = selectedArchivedGoals.length > 0 || selectedArchiveEmptyGroups.size > 0;
+  const unarchivePreview = useMemo(() => archiveAction === 'archive' && hasUnarchiveSelection ? unarchiveSelected(state,
+    new Set(selectedArchivedGoals.flatMap((goal) => goal.aims.map((aim) => aim.id))),
+    undefined,
+    selectedArchiveEmptyGroups,
+    new Set(selectedArchivedGoals.flatMap((goal) => goal.archiveIds))) : null, [archiveAction, hasUnarchiveSelection, selectedArchiveEmptyGroups, selectedArchivedGoals, state]);
+  const canUnarchiveSelection = hasUnarchiveSelection && Boolean(unarchivePreview) && selectedArchivedGoals.every((goal) => goal.archiveIds.every((id) => !unarchivePreview!.archive.some((group) => group.id === id))) && [...selectedArchiveEmptyGroups].every((id) => !unarchivePreview!.archive.some((group) => group.id === id));
+  const finishArchiveTitleEdit = useCallback(() => {
+    const draft = archiveTitleEditRef.current;
+    if (draft === null) return;
+    archiveTitleEditRef.current = null;
+    setArchiveTitleDraft(null);
+    const clean = draft.trim();
+    if (clean && clean !== state.archiveTitle) onChange((current) => ({ ...current, archiveTitle: clean }));
+  }, [onChange, state.archiveTitle]);
+  const closeArchive = useCallback(() => { finishArchiveTitleEdit(); Keyboard.dismiss(); onCloseArchive?.(); }, [finishArchiveTitleEdit, onCloseArchive]);
   useEffect(() => {
-    if (!archiveOpen) return undefined;
+    if (!archiveView) return undefined;
     const back = BackHandler.addEventListener('hardwareBackPress', () => { closeArchive(); return true; });
     return () => back.remove();
-  }, [archiveOpen, closeArchive]);
+  }, [archiveView, closeArchive]);
   useEffect(() => () => { settleAnimationRef.current?.stop(); }, []);
 
   const cancelDrag = () => {
@@ -250,50 +333,98 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
     setGroupDragging(null);
   };
 
+  const showValidationError = (offset: Animated.Value) => {
+    offset.stopAnimation();
+    offset.setValue(0);
+    Animated.sequence([8, -8, 6, -6, 0].map((toValue) => Animated.timing(offset, { toValue, duration: 55, useNativeDriver: true }))).start();
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+  };
+
   const openAddAim = (group: AimGroup) => {
-    if (group.aims.length >= MAX_AIMS_PER_GROUP) return;
-    Keyboard.dismiss();
+    if (editingLocked || textEditing || group.aims.length >= MAX_AIMS_PER_GROUP) return;
     cancelDrag();
+    const id = makeAimId();
+    const name = `Step ${group.aims.length + 1}`;
+    inlineEditRef.current = { kind: 'aim', id, value: '', isNew: true, groupId: group.id, originalEmptyCompleted: group.emptyCompleted };
     setValue('');
-    setNewAimNote('');
-    setError('');
-    setEditor({ kind: 'addAim', groupId: group.id });
+    onChange((current) => addAim(current, name, group.id, undefined, '', id));
+    setEditor({ kind: 'aim', id, isNew: true });
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   };
-  const openAddGroup = () => { Keyboard.dismiss(); cancelDrag(); setValue(''); setNewAimNote(''); setError(''); setEditor({ kind: 'addGroup' }); void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); };
-  const openTitleEditor = (group: AimGroup) => { cancelDrag(); inlineEditRef.current = { kind: 'title', id: group.id, value: group.title }; setValue(group.title); setError(''); setEditor({ kind: 'title', id: group.id }); };
-  const openAimEditor = (id: string, text: string) => { cancelDrag(); inlineEditRef.current = { kind: 'aim', id, value: text }; setValue(text); setError(''); setEditor({ kind: 'aim', id }); };
-  const closeEditor = () => { Keyboard.dismiss(); setEditor(null); };
+  const openAddGroup = () => {
+    if (editingLocked || textEditing) return;
+    if (groups.length >= MAX_GROUPS) {
+      setGoalLimitError(true);
+      showValidationError(goalLimitShake);
+      return;
+    }
+    setGoalLimitError(false);
+    cancelDrag();
+    if (groups.length === 0) { setActiveAction(null); setOrganizeOpen(false); }
+    const id = makeAimId();
+    const name = `Goal ${groups.length + 1}`;
+    inlineEditRef.current = { kind: 'title', id, value: '', isNew: true };
+    setValue('');
+    onChange((current) => addGroup(current, name, undefined, id));
+    setEditor({ kind: 'title', id, isNew: true });
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+  const revertInlineCreation = (draft: InlineEdit) => {
+    onChange((current) => {
+      if (draft.kind === 'title') return deleteGroup(current, draft.id);
+      const withoutDraft = deleteAim(current, draft.id);
+      if (!draft.groupId) return withoutDraft;
+      return {
+        ...withoutDraft,
+        active: {
+          ...withoutDraft.active,
+          groups: withoutDraft.active.groups.map((group) => group.id === draft.groupId ? { ...group, emptyCompleted: draft.originalEmptyCompleted } : group),
+        },
+      };
+    });
+  };
   const finishInlineEdit = (kind: InlineEdit['kind'], id: string) => {
     const draft = inlineEditRef.current;
     if (!draft || draft.kind !== kind || draft.id !== id) return;
-    inlineEditRef.current = null;
     const clean = draft.value.trim();
-    if (clean) onChange((current) => draft.kind === 'title' ? renameGroup(current, draft.id, clean) : renameAim(current, draft.id, clean));
+    inlineEditRef.current = null;
+    if (clean) {
+      onChange((current) => draft.kind === 'title' ? renameGroup(current, draft.id, clean) : renameAim(current, draft.id, clean));
+    } else if (draft.isNew) revertInlineCreation(draft);
     setEditor((current) => current?.kind === draft.kind && current.id === draft.id ? null : current);
-    setError('');
   };
-  const saveEditor = () => {
-    if (!editor) return;
-    const clean = value.trim();
-    if (!clean) { setError(editor.kind === 'addAim' || editor.kind === 'aim' ? 'Write an aim to continue.' : 'Enter a title to continue.'); return; }
-    if (editor.kind === 'addAim') {
-      const group = groups.find((item) => item.id === editor.groupId);
-      if (!group || group.aims.length >= MAX_AIMS_PER_GROUP) { setError('This set already has 5 aims.'); return; }
-      onChange((current) => addAim(current, clean, editor.groupId, undefined, newAimNote));
-    } else if (editor.kind === 'addGroup') {
-      onChange((current) => addGroup(current, clean));
-    } else if (editor.kind === 'title') {
-      onChange((current) => renameGroup(current, editor.id, clean));
-    } else {
-      onChange((current) => renameAim(current, editor.id, clean));
-    }
-    void Haptics.selectionAsync();
-    closeEditor();
+  const cancelInlineEdit = (kind: InlineEdit['kind'], id: string) => {
+    const draft = inlineEditRef.current;
+    if (!draft || draft.kind !== kind || draft.id !== id) return;
+    inlineEditRef.current = null;
+    setEditor((current) => current?.kind === kind && current.id === id ? null : current);
+    Keyboard.dismiss();
+    if (!draft.isNew) return;
+    revertInlineCreation(draft);
+  };
+  const finishPreviousEdit = (nextId: string) => {
+    const draft = inlineEditRef.current;
+    if (draft && draft.id !== nextId) finishInlineEdit(draft.kind, draft.id);
+    return inlineEditRef.current === null || inlineEditRef.current.id === nextId;
+  };
+  const openTitleEditor = (group: AimGroup) => {
+    if (editingLocked) return;
+    if (!finishPreviousEdit(group.id)) return;
+    cancelDrag();
+    inlineEditRef.current = { kind: 'title', id: group.id, value: group.title, isNew: false };
+    setValue(group.title);
+    setEditor({ kind: 'title', id: group.id, isNew: false });
+  };
+  const openAimEditor = (id: string, text: string) => {
+    if (editingLocked) return;
+    if (!finishPreviousEdit(id)) return;
+    cancelDrag();
+    inlineEditRef.current = { kind: 'aim', id, value: text, isNew: false };
+    setValue(text);
+    setEditor({ kind: 'aim', id, isNew: false });
   };
 
   const toggleGroupCollapsed = (groupId: string) => {
-    if (!collapsedGroups.has(groupId) && completionGroupId === groupId) setCompletionGroupId(null);
     setCollapsedGroups((current) => {
       const next = new Set(current);
       if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
@@ -411,6 +542,10 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
   };
 
   const toggleAim = (id: string) => {
+    if (activeAction === 'complete') {
+      setActiveCompletionDraft((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+      return;
+    }
     setSelected((current) => {
       const next = new Set([...current].filter((item) => activeIds.has(item)));
       if (next.has(id)) next.delete(id); else next.add(id);
@@ -418,6 +553,10 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
     });
   };
   const toggleGroup = (group: AimGroup) => {
+    if (activeAction === 'complete') {
+      setActiveCompletionDraft((current) => setGoalCompletionDraft(current, group, !goalCompletionInDraft(group, current)));
+      return;
+    }
     if (!group.aims.length) {
       setSelectedEmptyGroupIds((current) => {
         const next = new Set([...current].filter((id) => groups.some((item) => item.id === id && item.aims.length === 0)));
@@ -426,160 +565,212 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
       });
       return;
     }
-    setSelected((current) => {
-      const next = new Set([...current].filter((item) => activeIds.has(item)));
-      const all = group.aims.every((aim) => next.has(aim.id));
-      for (const aim of group.aims) { if (all) next.delete(aim.id); else next.add(aim.id); }
+    const wasSelected = selectedGroupIds.has(group.id);
+    setSelectedGroupIds((current) => {
+      const next = new Set(current);
+      if (wasSelected) next.delete(group.id); else next.add(group.id);
       return next;
     });
+    if (activeAction === 'delete') {
+      setSelected((current) => new Set([...current].filter((item) => !group.aims.some((aim) => aim.id === item))));
+    }
   };
   const toggleArchivedAim = (id: string) => {
+    if (archiveAction === 'complete') {
+      setArchiveCompletionDraft((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+      return;
+    }
     setSelectedArchived((current) => {
       const next = new Set([...current].filter((item) => archivedIds.has(item)));
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   };
-  const toggleArchivedGroup = (aims: ArchivedAimItem[]) => {
-    setSelectedArchived((current) => {
-      const next = new Set([...current].filter((item) => archivedIds.has(item)));
-      const all = aims.every((aim) => next.has(aim.id));
-      for (const aim of aims) { if (all) next.delete(aim.id); else next.add(aim.id); }
+  const toggleArchivedGroup = (goal: ArchivedGoalDisplay) => {
+    if (archiveAction === 'complete') {
+      setArchiveCompletionDraft((current) => setGoalCompletionDraft(current, goal, !goalCompletionInDraft(goal, current)));
+      return;
+    }
+    const wasSelected = selectedArchivedGoalKeys.has(goal.key);
+    setSelectedArchivedGoalKeys((current) => {
+      const next = new Set(current);
+      if (wasSelected) next.delete(goal.key); else next.add(goal.key);
       return next;
     });
+    if (archiveAction === 'delete') {
+      setSelectedArchived((current) => new Set([...current].filter((item) => !goal.aims.some((aim) => aim.id === item))));
+    }
   };
   const toggleArchivedEmptyGroup = (id: string) => {
+    if (archiveAction === 'complete') {
+      setArchiveCompletionDraft((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+      return;
+    }
     setSelectedArchivedEmptyGroupIds((current) => {
       const next = new Set([...current].filter((item) => archivedEmptyGroupIds.has(item)));
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   };
-  const toggleSelectionMode = () => {
-    setCompletionGroupId(null);
-    setSelectionMode((current) => !current);
+  const clearActiveSelection = () => {
     setSelected(new Set());
+    setSelectedGroupIds(new Set());
     setSelectedEmptyGroupIds(new Set());
+    setActiveCompletionDraft(new Set());
   };
-  const cancelSelectionMode = () => {
-    setSelectionMode(false);
-    setSelected(new Set());
-    setSelectedEmptyGroupIds(new Set());
+  const toggleOrganize = () => {
+    setOrganizeOpen((current) => !current);
+    if (!organizeOpen) setActiveAction(null);
+    clearActiveSelection();
   };
-  const selectAllAims = () => {
-    const allSelected = selectedActive.size + selectedEmptyGroups.size === activeIds.size + emptyGroupIds.size;
-    setSelected(allSelected ? new Set() : new Set(activeIds));
-    setSelectedEmptyGroupIds(allSelected ? new Set() : new Set(emptyGroupIds));
-  };
-  const toggleArchiveSelectionMode = () => {
-    setArchiveSelectionMode((current) => !current);
+  const clearArchivedSelection = () => {
     setSelectedArchived(new Set());
+    setSelectedArchivedGoalKeys(new Set());
     setSelectedArchivedEmptyGroupIds(new Set());
+    setArchiveCompletionDraft(new Set());
   };
-  const cancelArchiveSelectionMode = () => {
-    setArchiveSelectionMode(false);
-    setSelectedArchived(new Set());
-    setSelectedArchivedEmptyGroupIds(new Set());
+  const toggleArchiveOrganize = () => {
+    setArchiveOrganizeOpen((current) => !current);
+    if (!archiveOrganizeOpen) setArchiveAction(null);
+    clearArchivedSelection();
   };
-  const selectAllArchivedAims = () => {
-    const allSelected = selectedArchiveActive.size + selectedArchiveEmptyGroups.size === archivedIds.size + archivedEmptyGroupIds.size;
-    setSelectedArchived(allSelected ? new Set() : new Set(archivedIds));
-    setSelectedArchivedEmptyGroupIds(allSelected ? new Set() : new Set(archivedEmptyGroupIds));
+  const toggleArchiveHeadingCollapsed = (headingKey: string) => {
+    setCollapsedArchiveHeadings((current) => {
+      const next = new Set(current);
+      if (next.has(headingKey)) next.delete(headingKey); else next.add(headingKey);
+      return next;
+    });
+  };
+  const archivedGoalFullySelected = (goal: ArchivedGoalDisplay) => archiveAction === 'complete'
+    ? goalCompletionInDraft(goal, archiveCompletionDraft)
+    : goal.emptyArchiveId
+    ? selectedArchiveEmptyGroups.has(goal.emptyArchiveId)
+    : selectedArchivedGoalKeys.has(goal.key);
+  const toggleArchivedHeading = (heading: ArchivedHeadingDisplay) => {
+    if (archiveAction === 'complete') {
+      setArchiveCompletionDraft((current) => {
+        const shouldComplete = !heading.goals.every((goal) => goalCompletionInDraft(goal, current));
+        return heading.goals.reduce((next, goal) => setGoalCompletionDraft(next, goal, shouldComplete), new Set(current));
+      });
+      return;
+    }
+    const wasSelected = heading.goals.every(archivedGoalFullySelected);
+    const aimIds = heading.goals.flatMap((goal) => goal.aims.map((aim) => aim.id));
+    const goalKeys = heading.goals.filter((goal) => goal.aims.length > 0).map((goal) => goal.key);
+    const emptyIds = heading.goals.flatMap((goal) => goal.emptyArchiveId ? [goal.emptyArchiveId] : []);
+    if (archiveAction === 'delete') setSelectedArchived((current) => new Set([...current].filter((id) => !aimIds.includes(id))));
+    setSelectedArchivedGoalKeys((current) => {
+      const next = new Set(current);
+      for (const key of goalKeys) { if (wasSelected) next.delete(key); else next.add(key); }
+      return next;
+    });
+    setSelectedArchivedEmptyGroupIds((current) => {
+      const next = new Set([...current].filter((id) => archivedEmptyGroupIds.has(id)));
+      for (const id of emptyIds) { if (wasSelected) next.delete(id); else next.add(id); }
+      return next;
+    });
+  };
+  const toggleArchivedGoalCollapsed = (goalKey: string) => {
+    setCollapsedArchivedGoals((current) => {
+      const next = new Set(current);
+      if (next.has(goalKey)) next.delete(goalKey); else next.add(goalKey);
+      return next;
+    });
+  };
+  const closeActiveOrganizeIfEmpty = (next: AimBoardState) => {
+    if (next.active.groups.length > 0) return;
+    setOrganizeOpen(false);
+  };
+  const closeArchiveOrganizeIfEmpty = (next: AimBoardState) => {
+    if (next.archive.length > 0) return;
+    setArchiveOrganizeOpen(false);
   };
   const archiveCurrentSelection = () => {
-    if (!hasActiveSelection) return;
-    const ids = new Set(selectedActive);
+    if (!canArchiveSelection) return;
+    setGoalLimitError(false);
+    const ids = new Set(groups.filter((group) => selectedGoals.has(group.id)).flatMap((group) => group.aims.map((aim) => aim.id)));
     const groupIds = new Set(selectedEmptyGroups);
+    const goalIds = new Set(selectedGoals);
     Keyboard.dismiss();
-    onChange((current) => archiveSelected(current, ids, undefined, groupIds));
-    setSelected(new Set());
-    setSelectedEmptyGroupIds(new Set());
-    setSelectionMode(false);
+    const next = onChange((current) => archiveSelected(current, ids, undefined, groupIds, goalIds));
+    clearActiveSelection();
+    closeActiveOrganizeIfEmpty(next);
     cancelDrag();
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
-  const completeCurrentSelection = () => {
-    if (!selectedActive.size) return;
-    const ids = new Set(selectedActive);
+  const saveActiveCompletionDraft = () => {
+    if (!activeCompletionChangeCount) return;
+    const { completeAimIds, completeEmptyGroupIds, uncompleteAimIds, uncompleteEmptyGroupIds } = activeCompletionChanges;
     Keyboard.dismiss();
-    const allCompleted = groups.flatMap((group) => group.aims).filter((aim) => ids.has(aim.id)).every((aim) => aim.completed);
-    onChange((current) => allCompleted ? uncompleteSelected(current, ids) : completeSelected(current, ids));
-    setSelected(new Set());
-    setSelectedEmptyGroupIds(new Set());
-    setSelectionMode(false);
-    cancelDrag();
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-  const completeAllActive = () => {
-    if (!activeIds.size && !emptyGroupIds.size) return;
-    const ids = new Set(activeIds);
-    const groupIds = new Set(emptyGroupIds);
-    onChange((current) => activeAllCompleted ? uncompleteSelected(current, ids, groupIds) : completeSelected(current, ids, groupIds));
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-  const archiveAllActive = () => {
-    if (!activeIds.size && !emptyGroupIds.size) return;
-    const ids = new Set(activeIds);
-    const groupIds = new Set(emptyGroupIds);
-    Keyboard.dismiss();
-    onChange((current) => archiveSelected(current, ids, undefined, groupIds));
-    setSelected(new Set());
-    setSelectedEmptyGroupIds(new Set());
-    setSelectionMode(false);
+    onChange((current) => uncompleteSelected(completeSelected(current, completeAimIds, completeEmptyGroupIds), uncompleteAimIds, uncompleteEmptyGroupIds));
+    clearActiveSelection();
     cancelDrag();
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
   const deleteCurrentSelection = () => {
-    if (!hasActiveSelection) return;
+    if (!selectedActive.size && !selectedEmptyGroups.size && !selectedGoals.size) return;
+    setGoalLimitError(false);
     const ids = new Set(selectedActive);
     const groupIds = new Set(selectedEmptyGroups);
+    const selectedGoalIds = new Set(selectedGoals);
     Keyboard.dismiss();
-    onChange((current) => deleteEmptyGroups(deleteSelected(current, ids), groupIds));
-    setSelected(new Set());
-    setSelectedEmptyGroupIds(new Set());
-    setSelectionMode(false);
+    const next = onChange((current) => deleteOrganizedSelected(current, ids, selectedGoalIds, groupIds));
+    clearActiveSelection();
+    closeActiveOrganizeIfEmpty(next);
     cancelDrag();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   };
   const unarchiveCurrentSelection = () => {
-    if (!hasArchiveSelection) return;
-    const ids = new Set(selectedArchiveActive);
+    if (!canUnarchiveSelection) return;
+    const ids = new Set(selectedArchivedGoals.flatMap((goal) => goal.aims.map((aim) => aim.id)));
     const groupIds = new Set(selectedArchiveEmptyGroups);
+    const goalArchiveIds = new Set(selectedArchivedGoals.flatMap((goal) => goal.archiveIds));
     Keyboard.dismiss();
-    onChange((current) => unarchiveSelected(current, ids, undefined, groupIds));
-    setSelectedArchived(new Set());
-    setSelectedArchivedEmptyGroupIds(new Set());
-    setArchiveSelectionMode(false);
+    const next = onChange((current) => unarchiveSelected(current, ids, undefined, groupIds, goalArchiveIds));
+    clearArchivedSelection();
+    closeArchiveOrganizeIfEmpty(next);
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
-  const completeArchivedSelection = () => {
-    if (!selectedArchiveActive.size) return;
-    const ids = new Set(selectedArchiveActive);
+  const saveArchiveCompletionDraft = () => {
+    if (!archiveCompletionChangeCount) return;
+    const { completeAimIds, completeEmptyGroupIds, uncompleteAimIds, uncompleteEmptyGroupIds } = archiveCompletionChanges;
     Keyboard.dismiss();
-    const allCompleted = state.archive.flatMap((group) => group.aims).filter((aim) => ids.has(aim.id)).every((aim) => aim.completed);
-    onChange((current) => allCompleted ? uncompleteArchivedSelected(current, ids) : completeArchivedSelected(current, ids));
-    setSelectedArchived(new Set());
-    setSelectedArchivedEmptyGroupIds(new Set());
-    setArchiveSelectionMode(false);
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-  const completeAllArchived = () => {
-    if (!archivedIds.size && !archivedEmptyGroupIds.size) return;
-    const ids = new Set(archivedIds);
-    const groupIds = new Set(archivedEmptyGroupIds);
-    onChange((current) => archivedAllCompleted ? uncompleteArchivedSelected(current, ids, groupIds) : completeArchivedSelected(current, ids, groupIds));
+    onChange((current) => uncompleteArchivedSelected(completeArchivedSelected(current, completeAimIds, completeEmptyGroupIds), uncompleteAimIds, uncompleteEmptyGroupIds));
+    clearArchivedSelection();
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
   const deleteArchivedSelection = () => {
-    if (!hasArchiveSelection) return;
+    if (!selectedArchiveActive.size && !selectedArchiveEmptyGroups.size && !selectedArchivedGoals.length) return;
     const ids = new Set(selectedArchiveActive);
     const groupIds = new Set(selectedArchiveEmptyGroups);
+    const selectedGoalIds = new Set(selectedArchivedGoals.flatMap((goal) => goal.archiveIds));
     Keyboard.dismiss();
-    onChange((current) => deleteArchivedSelected(current, ids, groupIds));
-    setSelectedArchived(new Set());
-    setSelectedArchivedEmptyGroupIds(new Set());
-    setArchiveSelectionMode(false);
+    const next = onChange((current) => deleteOrganizedArchivedSelected(current, ids, selectedGoalIds, groupIds));
+    clearArchivedSelection();
+    closeArchiveOrganizeIfEmpty(next);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+  const chooseActiveAction = (action: OrganizeAction) => {
+    if (textEditing) return;
+    clearActiveSelection();
+    setActiveAction(action);
+  };
+  const chooseArchiveAction = (action: OrganizeAction) => {
+    if (textEditing) return;
+    clearArchivedSelection();
+    setArchiveAction(action);
+  };
+  const cancelActiveAction = () => { clearActiveSelection(); setActiveAction(null); };
+  const cancelArchiveAction = () => { clearArchivedSelection(); setArchiveAction(null); };
+  const processActiveAction = () => {
+    if (activeAction === 'delete') deleteCurrentSelection();
+    else if (activeAction === 'complete') saveActiveCompletionDraft();
+    else if (activeAction === 'archive') archiveCurrentSelection();
+  };
+  const processArchiveAction = () => {
+    if (archiveAction === 'delete') deleteArchivedSelection();
+    else if (archiveAction === 'complete') saveArchiveCompletionDraft();
+    else if (archiveAction === 'archive') unarchiveCurrentSelection();
   };
   const updateNote = (id: string, archived: boolean, next: string) => {
     onChange((current) => archived ? updateArchivedNote(current, id, next) : updateAimNote(current, id, next));
@@ -592,13 +783,21 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
     const finalNote = edit.latest.trim();
     if (finalNote !== edit.latest) updateNote(id, edit.archived, finalNote);
   };
-  const noteInput = (id: string, text: string, note: string, archived: boolean, completionControl = false) => {
-    const selecting = archived ? archiveSelectionMode : selectionMode || completionControl;
-    if (!note && focusedNoteId !== id) return <Pressable accessibilityRole="button" accessibilityLabel={`Add note for ${text}`} onPress={() => setFocusedNoteId(id)} style={[styles.addNoteButton, selecting ? styles.noteWithSelection : styles.noteWithoutSelection]}>
+  const cancelNoteEdit = (id: string) => {
+    const edit = noteEditRef.current;
+    if (!edit || edit.id !== id) return;
+    noteEditRef.current = null;
+    setFocusedNoteId(null);
+    Keyboard.dismiss();
+    if (edit.latest !== edit.original) updateNote(id, edit.archived, edit.original);
+  };
+  const noteInput = (id: string, text: string, note: string, archived: boolean, selecting: boolean) => {
+    if (editingLocked) return note ? <View style={[selecting ? styles.noteWithSelection : styles.noteWithoutSelection, styles.noteReadOnly]}><Text numberOfLines={3} style={styles.notePreviewText}>{note}</Text></View> : null;
+    if (!note && focusedNoteId !== id) return textEditing ? null : <Pressable accessibilityRole="button" accessibilityLabel={`Add note for ${text}`} onPress={() => setFocusedNoteId(id)} style={[styles.addNoteButton, selecting ? styles.noteWithSelection : styles.noteWithoutSelection]}>
       <Feather name="plus" size={13} color={colors.textMuted} accessible={false} />
       <Text style={styles.addNoteText}>Add note</Text>
     </Pressable>;
-    return <View style={selecting ? styles.noteWithSelection : styles.noteWithoutSelection}><TextInput
+    return <View style={[selecting ? styles.noteWithSelection : styles.noteWithoutSelection, styles.noteEditWrap]}><TextInput
       value={note}
       onFocus={() => { noteEditRef.current = { id, archived, original: note, latest: note }; setFocusedNoteId(id); }}
       onChangeText={(next) => {
@@ -620,72 +819,108 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
       accessibilityLabel={`Write note for ${text}`}
       style={styles.noteInput}
     />
+      {focusedNoteId === id && <Pressable accessibilityRole="button" accessibilityLabel={`Cancel note edit for ${text}`} onPressIn={() => cancelNoteEdit(id)} onPress={() => cancelNoteEdit(id)} hitSlop={4} style={({ pressed }) => [styles.noteCancelButton, pressed && styles.cancelEditButtonPressed]}>
+        <Feather name="x" size={18} color={colors.textMuted} accessible={false} />
+      </Pressable>}
       {focusedNoteId === id && <Text style={styles.characterFooter}>{note.length} / 240</Text>}
     </View>;
   };
 
   return <View style={styles.root}>
-    {archiveOpen ? <>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.archiveContent} keyboardShouldPersistTaps={focusedNoteId ? 'never' : 'handled'} keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
-        <RevealableToolbar top={<>
-          <PressFeedback label="Back to aims" onPress={closeArchive} style={styles.backButton}><Feather name="arrow-left" size={21} color={colors.text} /></PressFeedback>
-          <Text style={styles.archiveTitle}>Archive</Text>
-        </>} selecting={archiveSelectionMode} onCancelSelection={cancelArchiveSelectionMode} colors={colors} styles={styles} toolbar={
-          <SelectionToolbar enabled={archiveSelectionMode} canSelect={archivedIds.size + archivedEmptyGroupIds.size > 0} selectedCount={selectedArchiveActive.size + selectedArchiveEmptyGroups.size} totalCount={archivedIds.size + archivedEmptyGroupIds.size} itemCount={archivedIds.size + archivedEmptyGroupIds.size} onToggle={toggleArchiveSelectionMode} onSelectAll={selectAllArchivedAims} onCompleteAll={completeAllArchived} canCompleteAll={!archivedAllCompleted} onUndo={onUndo} onRedo={onRedo} canUndo={canUndo} canRedo={canRedo} showArchiveAction={false} colors={colors} styles={styles} />
-        }>
-        {sections.map((section) => <View key={section.dateKey} style={styles.archiveDateBlock}>
-          <Text style={styles.eyebrow}>{formatArchiveDate(section.dateKey).toUpperCase()}</Text>
-          {section.titles.map((group) => {
-            const count = group.aims.filter((aim) => selectedArchiveActive.has(aim.id)).length;
-            const all = group.emptyArchiveId ? selectedArchiveEmptyGroups.has(group.emptyArchiveId) : count === group.aims.length;
-            const groupCompleted = group.aims.length === 0 ? group.emptyCompleted === true : group.aims.every((aim) => aim.completed);
-            return <View key={`${group.id}:${group.title}`} style={styles.archiveGroup}>
-              <View style={styles.groupRow}>
-                {archiveSelectionMode
-                  ? <SelectionCircle group selected={all} partial={count > 0 && !all} label={group.emptyArchiveId ? `Select empty archived group: ${group.title}` : `Select all archived aims in ${group.title}`} onPress={() => { if (group.emptyArchiveId) toggleArchivedEmptyGroup(group.emptyArchiveId); else toggleArchivedGroup(group.aims); }} colors={colors} />
-                  : <GroupCompletionSquare title={group.title} completed={groupCompleted} onPress={() => onChange((current) => group.emptyArchiveId ? toggleArchivedEmptyGroupCompleted(current, group.emptyArchiveId) : groupCompleted ? uncompleteArchivedSelected(current, new Set(group.aims.map((aim) => aim.id))) : completeArchivedSelected(current, new Set(group.aims.map((aim) => aim.id))))} colors={colors} styles={styles} />}
-                <View style={styles.rowTextWrap}><Text style={[styles.groupTitle, groupCompleted && styles.completedGroupTitle]}>{group.title}</Text></View>
-              </View>
-              {group.aims.map((aim, index) => <View key={aim.id} style={styles.archiveAim}>
-                <View style={[styles.aimRow, aim.completed && styles.completedAimBlock, !archiveSelectionMode && styles.rowWithoutSelection]}>
-                  {archiveSelectionMode && <SelectionCircle selected={selectedArchiveActive.has(aim.id)} label={`Select archived aim: ${aim.text}`} onPress={() => toggleArchivedAim(aim.id)} colors={colors} />}
-                  <Text style={styles.aimNumber}>{index + 1}.</Text>
-                  <View style={styles.rowTextWrap}><Text style={[styles.aimText, aim.completed && styles.completedAimText]}>{aim.text}</Text></View>
+    {archiveView ? <>
+      <ScrollView style={styles.scroll} contentContainerStyle={[styles.archiveContent, { paddingBottom: organizerToggleHeight + (archiveOrganizeOpen && state.archive.length > 0 ? ORGANIZER_MENU_HEIGHT + 20 : 24) }]} keyboardShouldPersistTaps={focusedNoteId ? 'never' : 'handled'} keyboardDismissMode="on-drag" showsVerticalScrollIndicator={false}>
+        <SelectableContent top={<>
+          <View style={styles.archiveTopRow}>
+            <PressFeedback label="Back to Archive" onPress={closeArchive} style={styles.backButton}><Feather name="arrow-left" size={21} color={colors.text} /></PressFeedback>
+            <View style={styles.archiveTitleSlot}>
+              {archiveTitleDraft !== null
+                ? <View style={styles.archiveTitleEditWrap}>
+                  <TextInput value={archiveTitleDraft} onChangeText={(next) => { archiveTitleEditRef.current = next; setArchiveTitleDraft(next); }} onBlur={finishArchiveTitleEdit} onSubmitEditing={finishArchiveTitleEdit} autoFocus maxLength={ARCHIVE_TITLE_MAX_LENGTH} returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" keyboardAppearance={effectiveTheme} underlineColorAndroid="transparent" accessibilityLabel="Edit Plans title" style={styles.archiveTitleInput} />
+                  <Text style={styles.archiveTitleCharacterFooter}>{archiveTitleDraft.length} / {ARCHIVE_TITLE_MAX_LENGTH}</Text>
                 </View>
-                {noteInput(aim.id, aim.text, aim.note, true)}
-              </View>)}
+                : <Pressable accessibilityRole="button" accessibilityLabel={`Rename Plans title: ${state.archiveTitle}`} accessibilityState={{ disabled: archiveSelectionMode }} disabled={archiveSelectionMode} onPress={() => { if (archiveSelectionMode) return; archiveTitleEditRef.current = state.archiveTitle; setArchiveTitleDraft(state.archiveTitle); }} style={({ pressed }) => [styles.archiveTitleEditTarget, pressed && styles.renameTargetPressed]}><Text numberOfLines={1} style={styles.archiveTitle}>{state.archiveTitle}</Text></Pressable>}
+            </View>
+            <View style={styles.archiveTopSpacer} accessible={false} />
+          </View>
+        </>} styles={styles}>
+        {sections.map((section) => <View key={section.dateKey} style={[styles.archiveDateBlock, !showArchiveDates && styles.archiveDateBlockWithoutHeading]}>
+          {showArchiveDates && <Text style={styles.eyebrow}>{formatArchiveDate(section.dateKey).toUpperCase()}</Text>}
+          {section.headings.map((heading) => {
+            const collapsed = collapsedArchiveHeadings.has(heading.key);
+            const headingSelected = heading.goals.every(archivedGoalFullySelected);
+            const headingPartiallySelected = !headingSelected && heading.goals.some((goal) => archiveAction === 'complete'
+              ? goal.aims.length === 0
+                ? goalCompletionInDraft(goal, archiveCompletionDraft)
+                : goal.aims.some((aim) => completionInDraft(aim.id, aim.completed, archiveCompletionDraft))
+              : goal.emptyArchiveId
+                ? selectedArchiveEmptyGroups.has(goal.emptyArchiveId)
+                : selectedArchivedGoalKeys.has(goal.key) || goal.aims.some((aim) => selectedArchiveActive.has(aim.id)));
+            return <View key={heading.key} style={styles.archiveHeadingSection}>
+              <View style={styles.archiveHeadingRow}>
+                {archiveSelectionMode && <SelectionCircle group selected={headingSelected} partial={headingPartiallySelected} label={`Select archived heading: ${heading.title}`} onPress={() => toggleArchivedHeading(heading)} colors={colors} action={archiveAction!} />}
+                <Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? 'Expand' : 'Collapse'} archived heading ${heading.title}`} accessibilityState={{ expanded: !collapsed }} onPress={() => toggleArchiveHeadingCollapsed(heading.key)} style={({ pressed }) => [styles.archiveHeadingTitleTarget, pressed && styles.collapseButtonPressed]}>
+                  <Text style={styles.archiveHeadingTitle}>{heading.title}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? 'Expand' : 'Collapse'} archived heading ${heading.title}`} accessibilityState={{ expanded: !collapsed }} onPress={() => toggleArchiveHeadingCollapsed(heading.key)} style={({ pressed }) => [styles.archiveHeadingCollapseButton, pressed && styles.collapseButtonPressed]}>
+                  <Feather name={collapsed ? 'chevron-down' : 'chevron-up'} size={19} color={colors.textMuted} accessible={false} />
+                </Pressable>
+              </View>
+              {!collapsed && heading.goals.map((group, goalIndex) => {
+                const count = group.aims.filter((aim) => selectedArchiveActive.has(aim.id)).length;
+                const goalExplicitlySelected = selectedArchivedGoalKeys.has(group.key);
+                const selectedGoal = archiveAction === 'complete' ? goalCompletionInDraft(group, archiveCompletionDraft) : group.emptyArchiveId ? selectedArchiveEmptyGroups.has(group.emptyArchiveId) : goalExplicitlySelected;
+                const partiallySelectedGoal = !selectedGoal && (archiveAction === 'complete' ? group.aims.some((aim) => completionInDraft(aim.id, aim.completed, archiveCompletionDraft)) : goalExplicitlySelected || count > 0);
+                const highlightGoalSteps = (archiveAction === 'archive' || archiveAction === 'delete') && selectedGoal;
+                const groupCompleted = archiveAction === 'complete' ? goalCompletionInDraft(group, archiveCompletionDraft) : goalIsCompleted(group);
+                const archiveStepSelectionVisible = archiveSelectionMode && archiveAction !== 'archive' && !(archiveAction === 'delete' && goalExplicitlySelected);
+                const goalCollapsed = collapsedArchivedGoals.has(group.key);
+                return <View key={group.key} style={[styles.archiveGroup, !archiveSelectionMode && hasCompletedArchivedGoal && styles.archiveGroupWithCompletionGutter]}>
+                  {archiveSelectionMode && showSelectHeader && group.key === firstVisibleArchiveGoalKey && <View style={[styles.selectCue, styles.archiveSelectCue]}><Text style={styles.selectCueText}>Select</Text></View>}
+                  <View style={styles.groupRow}>
+                    {!archiveSelectionMode && groupCompleted && <CompletedGoalIndicator title={group.title} colors={colors} style={styles.completedGoalIndicator} />}
+                    {archiveSelectionMode && <SelectionCircle group selected={selectedGoal} partial={partiallySelectedGoal} label={archiveAction === 'complete' ? `${selectedGoal ? 'Mark incomplete' : 'Mark complete'} archived goal: ${group.title}` : group.emptyArchiveId ? `Select empty archived goal: ${group.title}` : `Select archived goal: ${group.title}`} onPress={() => { if (group.emptyArchiveId) toggleArchivedEmptyGroup(group.emptyArchiveId); else toggleArchivedGroup(group); }} colors={colors} action={archiveAction!} />}
+                    <View style={styles.goalNumberSlot} accessible={false}><Text style={styles.goalNumber}>{goalIndex + 1}.</Text></View>
+                    {group.aims.length > 0
+                      ? <Pressable accessibilityRole="button" accessibilityLabel={`${goalCollapsed ? 'Expand' : 'Collapse'} archived goal ${group.title}`} accessibilityState={{ expanded: !goalCollapsed }} onPress={() => toggleArchivedGoalCollapsed(group.key)} style={({ pressed }) => [styles.rowTextWrap, highlightGoalSteps && styles.selectedGroupTitle, pressed && styles.collapseButtonPressed]}><Text style={[styles.groupTitle, groupCompleted && styles.completedGroupTitle]}>{group.title}</Text></Pressable>
+                      : <View style={[styles.rowTextWrap, highlightGoalSteps && styles.selectedGroupTitle]}><Text style={[styles.groupTitle, groupCompleted && styles.completedGroupTitle]}>{group.title}</Text></View>}
+                    {group.aims.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel={`${goalCollapsed ? 'Expand' : 'Collapse'} archived goal ${group.title}`} accessibilityState={{ expanded: !goalCollapsed }} onPress={() => toggleArchivedGoalCollapsed(group.key)} style={({ pressed }) => [styles.collapseButton, pressed && styles.collapseButtonPressed]}><Feather name={goalCollapsed ? 'chevron-down' : 'chevron-up'} size={20} color={colors.textMuted} accessible={false} /></Pressable>}
+                  </View>
+                  {!goalCollapsed && <View>
+                  {group.aims.map((aim, index) => <View key={aim.id} style={[styles.archiveAim, highlightGoalSteps && styles.selectedAimBlock]}>
+                    <View style={[styles.aimRow, (archiveAction === 'complete' ? completionInDraft(aim.id, aim.completed, archiveCompletionDraft) : aim.completed) && styles.completedAimBlock, highlightGoalSteps && styles.selectedAimBlock, !archiveStepSelectionVisible && styles.rowWithoutSelection]}>
+                      {archiveStepSelectionVisible && <SelectionCircle selected={archiveAction === 'complete' ? completionInDraft(aim.id, aim.completed, archiveCompletionDraft) : selectedArchiveActive.has(aim.id)} label={archiveAction === 'complete' ? `${completionInDraft(aim.id, aim.completed, archiveCompletionDraft) ? 'Mark incomplete' : 'Mark complete'} archived step: ${aim.text}` : `Select archived step: ${aim.text}`} onPress={() => toggleArchivedAim(aim.id)} colors={colors} action={archiveAction!} />}
+                      <Text style={styles.aimNumber}>{goalIndex + 1}.{index + 1}</Text>
+                      <View style={styles.rowTextWrap}><Text style={[styles.aimText, (archiveAction === 'complete' ? completionInDraft(aim.id, aim.completed, archiveCompletionDraft) : aim.completed) && styles.completedAimText]}>{aim.text}</Text></View>
+                    </View>
+                    {noteInput(aim.id, aim.text, aim.note, true, archiveStepSelectionVisible)}
+                  </View>)}
+                  </View>}
+                </View>;
+              })}
             </View>;
           })}
         </View>)}
-        </RevealableToolbar>
+        </SelectableContent>
       </ScrollView>
-      {archiveSelectionMode && state.archive.length > 0 && <View style={styles.archiveFooter}>
-        <View style={[styles.footerActions, hasArchiveSelection && styles.footerActionsSelected]}>
-          {hasArchiveSelection && <PressFeedback label={`Delete ${selectedArchiveActive.size + selectedArchiveEmptyGroups.size} selected archived items`} onPress={deleteArchivedSelection} style={styles.deleteSelectedButton}>
-            <Feather name="trash-2" size={18} color={colors.dangerForeground} />
-          </PressFeedback>}
-          <PressFeedback label={hasArchiveSelection ? `Unarchive ${selectedArchiveActive.size + selectedArchiveEmptyGroups.size} selected items` : 'Select archived items to unarchive'} onPress={unarchiveCurrentSelection} disabled={!hasArchiveSelection} style={[styles.archiveTarget, hasArchiveSelection && styles.archiveTargetReady]}>
-            <Feather name="corner-up-left" size={20} color={hasArchiveSelection ? colors.archiveAccentForeground : colors.textMuted} />
-            <Text style={[styles.archiveTargetText, hasArchiveSelection && styles.archiveTargetTextReady]}>Unarchive{hasArchiveSelection ? `  ·  ${selectedArchiveActive.size + selectedArchiveEmptyGroups.size}` : ''}</Text>
-          </PressFeedback>
-          {selectedArchiveEmptyGroups.size > 0 && selectedArchiveActive.size === 0 && <View style={styles.completeActionPlaceholder} />}
-          {selectedArchiveActive.size > 0 && <PressFeedback label={`Mark ${selectedArchiveActive.size} selected archived aims ${selectedArchiveAllCompleted ? 'incomplete' : 'complete'}`} onPress={completeArchivedSelection} style={styles.completeSelectedButton}>
-            <Feather name="check" size={20} color={colors.sageForeground} />
-          </PressFeedback>}
-        </View>
-      </View>}
+      <OrganizerDock open={archiveOrganizeOpen && state.archive.length > 0} canOpen={archivedIds.size + archivedEmptyGroupIds.size > 0} showLabel={showOrganizeHeader} enlargeWhenUnlabeled={largeUnlabeledOrganizerIcons.organize} onToggle={toggleArchiveOrganize} onClosed={finishArchiveOrganizeClose} colors={colors} styles={styles}>
+        {archiveAction
+          ? <ProcessActionButton action={archiveAction} archived showActionLabel={showOrganizerLabels[archiveAction]} showLabels={showOrganizerProcessLabels} enlargeWhenUnlabeled={largeUnlabeledOrganizerIcons[archiveAction]} count={archiveAction === 'complete' ? archiveCompletionChangeCount : archiveAction === 'archive' ? selectedArchivedGoals.length + selectedArchiveEmptyGroups.size : selectedArchiveActive.size + selectedArchiveEmptyGroups.size + selectedArchivedGoals.length} disabled={archiveAction === 'archive' ? !canUnarchiveSelection : archiveAction === 'complete' ? archiveCompletionChangeCount === 0 : selectedArchiveActive.size + selectedArchiveEmptyGroups.size + selectedArchivedGoals.length === 0} blocked={archiveAction === 'archive' && hasUnarchiveSelection && !canUnarchiveSelection} saveOnlyUncomplete={archiveAction === 'complete' && archiveNewCompletionCount === 0} onPress={() => { if (archiveAction !== 'complete') setPendingConfirmation(archiveAction); }} onSave={processArchiveAction} onCancel={cancelArchiveAction} colors={colors} styles={styles} />
+          : <OrganizeActions archived onChoose={chooseArchiveAction} showLabels={showOrganizerLabels} enlargeWhenUnlabeled={largeUnlabeledOrganizerIcons} disabled={textEditing} colors={colors} styles={styles} />}
+      </OrganizerDock>
     </> : <>
-      <ScrollView style={styles.scroll} contentContainerStyle={[scrollContentStyle, styles.homeContent]} keyboardShouldPersistTaps={focusedNoteId ? 'never' : 'handled'} keyboardDismissMode="on-drag" scrollEnabled={!dragging && !aimPressHeld && !groupDragging} showsVerticalScrollIndicator={false}>
-        <RevealableToolbar top={header} selecting={selectionMode} onCancelSelection={cancelSelectionMode} colors={colors} styles={styles} toolbar={
-          <SelectionToolbar enabled={selectionMode} canSelect={groups.length > 0} selectedCount={selectedActive.size + selectedEmptyGroups.size} totalCount={activeIds.size + emptyGroupIds.size} itemCount={activeIds.size + emptyGroupIds.size} onToggle={toggleSelectionMode} onSelectAll={selectAllAims} onCompleteAll={completeAllActive} canCompleteAll={!activeAllCompleted} onArchiveAll={archiveAllActive} canArchiveAll={activeIds.size + emptyGroupIds.size > 0} onUndo={onUndo} onRedo={onRedo} canUndo={canUndo} canRedo={canRedo} colors={colors} styles={styles} />
-        }>
+      <ScrollView style={styles.scroll} contentContainerStyle={[scrollContentStyle, styles.homeContent, { paddingBottom: organizerToggleHeight + (organizeOpen && groups.length > 0 ? ORGANIZER_MENU_HEIGHT + 20 : 24) }]} keyboardShouldPersistTaps={focusedNoteId ? 'never' : 'handled'} keyboardDismissMode="on-drag" scrollEnabled={!dragging && !aimPressHeld && !groupDragging} showsVerticalScrollIndicator={false}>
+        <SelectableContent top={header} styles={styles}>
         <View style={styles.boardArea}>
           <View style={styles.listDivider} />
+          {selectionMode && showSelectHeader && !textEditing && groups.length > 0 && <View style={[styles.selectCue, styles.activeSelectCue]}><Text style={styles.selectCueText}>Select</Text></View>}
           {groups.map((group, groupIndex) => {
             const count = group.aims.filter((aim) => selectedActive.has(aim.id)).length;
-            const all = group.aims.length > 0 && count === group.aims.length;
-            const groupSelected = group.aims.length === 0 ? selectedEmptyGroups.has(group.id) : all;
-            const groupCompleted = group.aims.length === 0 ? group.emptyCompleted === true : group.aims.every((aim) => aim.completed);
+            const groupExplicitlySelected = selectedGroupIds.has(group.id);
+            const groupSelected = activeAction === 'complete' ? goalCompletionInDraft(group, activeCompletionDraft) : group.aims.length === 0 ? selectedEmptyGroups.has(group.id) : groupExplicitlySelected;
+            const groupPartiallySelected = group.aims.length > 0 && !groupSelected && (activeAction === 'complete' ? group.aims.some((aim) => completionInDraft(aim.id, aim.completed, activeCompletionDraft)) : groupExplicitlySelected || count > 0);
+            const highlightGoalSteps = (activeAction === 'archive' || activeAction === 'delete') && groupSelected;
+            const stepSelectionVisible = selectionMode && activeAction !== 'archive' && !(activeAction === 'delete' && groupExplicitlySelected);
+            const groupCompleted = activeAction === 'complete' ? goalCompletionInDraft(group, activeCompletionDraft) : goalIsCompleted(group);
             const collapsed = collapsedGroups.has(group.id);
             const groupDrag = dragging?.groupId === group.id ? dragging : null;
             const sourceIndex = groupDrag ? group.aims.findIndex((aim) => aim.id === groupDrag.aimId) : -1;
@@ -693,113 +928,89 @@ export function AimBoardScreen({ header, state, onChange, onUndo, onRedo, canUnd
             const isGroupDragging = groupDragging?.groupId === group.id;
             const isGroupDropTarget = groupDragging && !isGroupDragging && groupDragging.layouts[groupDragging.toIndex]?.id === group.id;
             const canDragGroup = collapsed && canReorderGroup(group);
-            const showAimCompletion = !selectionMode && !collapsed && completionGroupId === group.id;
-            return <Animated.View key={group.id} collapsable={false} onLayout={(event) => registerGroupLayout(group.id, event)} style={[styles.group, groupIndex === 0 && styles.firstGroup, isGroupDragging && styles.draggedGroup, isGroupDropTarget && styles.groupDropTarget, isGroupDragging && { transform: [{ translateY: groupDragOffset }] }]}>
+            const newGoalEditing = editor?.kind === 'title' && editor.id === group.id && editor.isNew;
+            const newStepEditing = editor?.kind === 'aim' && editor.isNew && group.aims.some((aim) => aim.id === editor.id);
+            return <Animated.View key={group.id} collapsable={false} onLayout={(event) => registerGroupLayout(group.id, event)} style={[styles.group, !selectionMode && hasCompletedActiveGoal && styles.groupWithCompletionGutter, groupIndex === 0 && styles.firstGroup, isGroupDragging && styles.draggedGroup, isGroupDropTarget && styles.groupDropTarget, isGroupDragging && { transform: [{ translateY: groupDragOffset }] }]}>
               <Pressable accessible={false} onLongPress={canDragGroup ? (event) => beginGroupDrag(group, event) : undefined} onPressMove={(event) => moveGroupDrag(group.id, event)} onPressOut={() => finishGroupDrag(group.id)} delayLongPress={450} pressRetentionOffset={canDragGroup ? AIM_DRAG_RETENTION : undefined} style={styles.groupRow}>
-                {selectionMode
-                  ? <SelectionCircle group selected={groupSelected} partial={count > 0 && !all} label={group.aims.length === 0 ? `Select empty group: ${group.title}` : `Select all aims in ${group.title}`} onPress={() => toggleGroup(group)} colors={colors} />
-                  : <GroupCompletionSquare title={group.title} completed={groupCompleted} onPress={() => onChange((current) => group.aims.length === 0 ? toggleEmptyGroupCompleted(current, group.id) : groupCompleted ? uncompleteSelected(current, new Set(group.aims.map((aim) => aim.id))) : completeSelected(current, new Set(group.aims.map((aim) => aim.id))))} colors={colors} styles={styles} />}
-                <View style={[styles.rowTextWrap, groupSelected && styles.selectedGroupTitle]}>
+                {!selectionMode && groupCompleted && !(editor?.kind === 'title' && editor.id === group.id) && <CompletedGoalIndicator title={group.title} colors={colors} style={styles.completedGoalIndicator} />}
+                {editor?.kind === 'title' && editor.id === group.id
+                  ? <Pressable accessibilityRole="button" accessibilityLabel={editor.isNew ? 'Cancel new goal' : `Cancel renaming ${group.title}`} onPressIn={() => cancelInlineEdit('title', group.id)} onPress={() => cancelInlineEdit('title', group.id)} style={({ pressed }) => [styles.groupCompletedButton, pressed && styles.cancelEditButtonPressed]}>
+                    <Feather name="x" size={20} color={colors.textMuted} accessible={false} />
+                  </Pressable>
+                  : selectionMode
+                  ? <SelectionCircle group selected={groupSelected} partial={groupPartiallySelected} label={activeAction === 'complete' ? `${groupSelected ? 'Mark incomplete' : 'Mark complete'} goal: ${group.title}` : group.aims.length === 0 ? `Select empty goal: ${group.title}` : `Select goal and its steps: ${group.title}`} onPress={() => toggleGroup(group)} colors={colors} action={activeAction!} />
+                  : null}
+                {!(editor?.kind === 'title' && editor.id === group.id) && <View style={styles.goalNumberSlot} accessible={false}><Text style={styles.goalNumber}>{groupIndex + 1}.</Text></View>}
+                <View style={[styles.rowTextWrap, activeAction !== 'complete' && groupSelected && styles.selectedGroupTitle]}>
                   {editor?.kind === 'title' && editor.id === group.id
                     ? <View style={styles.inlineEditWrap}>
-                      <TextInput key={`group-title-${group.id}`} value={value} onChangeText={(next) => { setValue(next); if (inlineEditRef.current?.kind === 'title' && inlineEditRef.current.id === group.id) inlineEditRef.current.value = next; }} onBlur={() => finishInlineEdit('title', group.id)} onSubmitEditing={() => finishInlineEdit('title', group.id)} autoFocus maxLength={40} returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" underlineColorAndroid="transparent" style={[styles.groupTitle, groupCompleted && styles.completedGroupTitle, styles.groupTitleInput]} accessibilityLabel="Edit group title" />
+                      <TextInput key={`group-title-${group.id}`} value={value} onChangeText={(next) => { setValue(next); if (inlineEditRef.current?.kind === 'title' && inlineEditRef.current.id === group.id) inlineEditRef.current.value = next; }} onBlur={() => finishInlineEdit('title', group.id)} onSubmitEditing={() => finishInlineEdit('title', group.id)} placeholder="Name this goal..." placeholderTextColor={colors.textMuted} autoFocus maxLength={40} returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" underlineColorAndroid="transparent" style={[styles.groupTitle, groupCompleted && styles.completedGroupTitle, styles.groupTitleInput]} accessibilityLabel="Edit goal title" />
                       <Text style={styles.characterFooter}>{value.length} / 40</Text>
                     </View>
-                    : <Pressable accessibilityRole="button" accessibilityLabel={`Rename group: ${group.title}`} accessibilityHint={canDragGroup ? 'Long press to reorder this collapsed group' : undefined} onPress={() => openTitleEditor(group)} onLongPress={canDragGroup ? (event) => beginGroupDrag(group, event) : undefined} onPressMove={(event) => moveGroupDrag(group.id, event)} onPressOut={() => finishGroupDrag(group.id)} delayLongPress={450} pressRetentionOffset={canDragGroup ? AIM_DRAG_RETENTION : undefined} style={({ pressed }) => [styles.groupTitleEditTarget, pressed && styles.renameTargetPressed]}>
+                    : <Pressable accessibilityRole="button" accessibilityLabel={`Rename goal: ${group.title}`} accessibilityHint={canDragGroup && !selectionMode ? 'Long press to reorder this collapsed goal' : undefined} accessibilityState={{ disabled: selectionMode }} disabled={selectionMode} onPress={() => openTitleEditor(group)} onLongPress={canDragGroup && !selectionMode ? (event) => beginGroupDrag(group, event) : undefined} onPressMove={(event) => moveGroupDrag(group.id, event)} onPressOut={() => finishGroupDrag(group.id)} delayLongPress={450} pressRetentionOffset={canDragGroup && !selectionMode ? AIM_DRAG_RETENTION : undefined} style={({ pressed }) => [styles.groupTitleEditTarget, pressed && styles.renameTargetPressed]}>
                       <Text selectable={false} style={[styles.groupTitle, groupCompleted && styles.completedGroupTitle]}>{group.title}</Text>
                     </Pressable>}
-                  {group.restoredFromDateKey && <View style={styles.oldGroupMeta}>
+                  {showRelatedTags && group.restoredFromDateKey && <View style={styles.oldGroupMeta}>
                     <Text style={styles.oldGroupDate}>{formatOldAimDate(group.restoredFromDateKey)}</Text>
                     <View style={styles.oldGroupTag}><Text style={styles.oldGroupTagText}>Old</Text></View>
                   </View>}
                 </View>
-                {!selectionMode && !collapsed && group.aims.length > 0 && <GroupCompletedButton title={group.title} completed={groupCompleted} label={`${showAimCompletion ? 'Finish choosing' : 'Choose'} aims to complete in ${group.title}`} onPress={() => {
-                  setCompletionGroupId((current) => current === group.id ? null : group.id);
-                }} colors={colors} styles={styles} />}
                 <Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? 'Expand' : 'Collapse'} ${group.title}`} accessibilityState={{ expanded: !collapsed }} onPress={() => toggleGroupCollapsed(group.id)} style={({ pressed }) => [styles.collapseButton, pressed && styles.collapseButtonPressed]}>
                   <Feather name={collapsed ? 'chevron-down' : 'chevron-up'} size={20} color={colors.textMuted} accessible={false} />
                 </Pressable>
               </Pressable>
-              {!collapsed && <View collapsable={false} style={groupDrag && { height: groupDrag.listHeight }}>
-              {group.aims.map((aim, index) => <AimBlock key={aim.id} id={aim.id} registerSlot={registerAimSlot} onLayout={({ nativeEvent }) => { aimHeights.current.set(aim.id, nativeEvent.layout.height); }} dragPress={group.aims.length > 1 ? { onLongPress: (event) => beginAimDrag(group, aim.id, event), onPressMove: (event) => moveAimDrag(group, aim.id, event), onPressOut: () => finishAimDrag(group, aim.id) } : undefined} style={[styles.aimBlock, selectedActive.has(aim.id) && !aim.completed && styles.selectedAimBlock]} draggedStyle={styles.draggedAim} draggedBorderStyle={styles.draggedAimBorder} dragging={groupDrag?.aimId === aim.id} previewActive={Boolean(groupDrag)} previewTop={previewTops?.get(aim.id) ?? 0} dragTop={dragTop}>
-                <View style={[styles.aimRow, aim.completed && styles.completedAimBlock, selectedActive.has(aim.id) && aim.completed && styles.selectedCompletedAimBlock, !selectionMode && !showAimCompletion && styles.rowWithoutSelection]}>
-                  {selectionMode && <SelectionCircle selected={selectedActive.has(aim.id)} label={`Select aim: ${aim.text}`} onPress={() => toggleAim(aim.id)} dragPress={group.aims.length > 1 ? { onLongPress: (event) => beginAimDrag(group, aim.id, event), onPressMove: (event) => moveAimDrag(group, aim.id, event), onPressOut: () => finishAimDrag(group, aim.id) } : undefined} colors={colors} />}
-                  {showAimCompletion && <AimCompletionCircle text={aim.text} completed={aim.completed} onPress={() => onChange((current) => aim.completed ? uncompleteSelected(current, new Set([aim.id])) : completeSelected(current, new Set([aim.id])))} colors={colors} />}
-                  <Text style={styles.aimNumber}>{(groupDrag ? previewIndex(index, sourceIndex, groupDrag.toIndex) : index) + 1}.</Text>
+              {!collapsed && <View>
+              <View collapsable={false} style={groupDrag && { height: groupDrag.listHeight }}>
+              {group.aims.map((aim, index) => <AimBlock key={aim.id} id={aim.id} registerSlot={registerAimSlot} onLayout={({ nativeEvent }) => { aimHeights.current.set(aim.id, nativeEvent.layout.height); }} dragPress={group.aims.length > 1 ? { onLongPress: (event) => beginAimDrag(group, aim.id, event), onPressMove: (event) => moveAimDrag(group, aim.id, event), onPressOut: () => finishAimDrag(group, aim.id) } : undefined} style={[styles.aimBlock, selectedActive.has(aim.id) && !aim.completed && styles.selectedAimBlock, highlightGoalSteps && styles.selectedAimBlock]} draggedStyle={styles.draggedAim} draggedBorderStyle={styles.draggedAimBorder} dragging={groupDrag?.aimId === aim.id} previewActive={Boolean(groupDrag)} previewTop={previewTops?.get(aim.id) ?? 0} dragTop={dragTop}>
+                <View style={[styles.aimRow, (activeAction === 'complete' ? completionInDraft(aim.id, aim.completed, activeCompletionDraft) : aim.completed) && styles.completedAimBlock, selectedActive.has(aim.id) && aim.completed && styles.selectedCompletedAimBlock, highlightGoalSteps && styles.selectedAimBlock, !stepSelectionVisible && styles.rowWithoutSelection]}>
+                  {stepSelectionVisible && <SelectionCircle selected={activeAction === 'complete' ? completionInDraft(aim.id, aim.completed, activeCompletionDraft) : selectedActive.has(aim.id)} label={activeAction === 'complete' ? `${completionInDraft(aim.id, aim.completed, activeCompletionDraft) ? 'Mark incomplete' : 'Mark complete'} step: ${aim.text}` : `Select step: ${aim.text}`} onPress={() => toggleAim(aim.id)} dragPress={group.aims.length > 1 ? { onLongPress: (event) => beginAimDrag(group, aim.id, event), onPressMove: (event) => moveAimDrag(group, aim.id, event), onPressOut: () => finishAimDrag(group, aim.id) } : undefined} colors={colors} action={activeAction!} />}
+                  {editor?.kind === 'aim' && editor.id === aim.id && editor.isNew
+                    ? <Pressable accessibilityRole="button" accessibilityLabel="Cancel new step" onPressIn={() => cancelInlineEdit('aim', aim.id)} onPress={() => cancelInlineEdit('aim', aim.id)} hitSlop={10} style={({ pressed }) => [styles.aimNumberCancelButton, pressed && styles.cancelEditButtonPressed]}>
+                      <Feather name="x" size={17} color={colors.textMuted} accessible={false} />
+                    </Pressable>
+                    : <Text style={styles.aimNumber}>{groupIndex + 1}.{(groupDrag ? previewIndex(index, sourceIndex, groupDrag.toIndex) : index) + 1}</Text>}
                   {editor?.kind === 'aim' && editor.id === aim.id
                     ? <View style={styles.inlineEditWrap}>
-                      <TextInput key={`aim-text-${aim.id}`} value={value} onChangeText={(next) => { setValue(next); if (inlineEditRef.current?.kind === 'aim' && inlineEditRef.current.id === aim.id) inlineEditRef.current.value = next; }} onBlur={() => finishInlineEdit('aim', aim.id)} onSubmitEditing={() => finishInlineEdit('aim', aim.id)} autoFocus maxLength={100} returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" underlineColorAndroid="transparent" style={[styles.aimText, styles.inlineAimInput, aim.completed && styles.completedAimText]} accessibilityLabel="Edit aim name" />
+                      <TextInput key={`aim-text-${aim.id}`} value={value} onChangeText={(next) => { setValue(next); if (inlineEditRef.current?.kind === 'aim' && inlineEditRef.current.id === aim.id) inlineEditRef.current.value = next; }} onBlur={() => finishInlineEdit('aim', aim.id)} onSubmitEditing={() => finishInlineEdit('aim', aim.id)} placeholder="Write this step..." placeholderTextColor={colors.textMuted} autoFocus maxLength={100} returnKeyType="done" enterKeyHint="done" submitBehavior="blurAndSubmit" underlineColorAndroid="transparent" style={[styles.aimText, styles.inlineAimInput, aim.completed && styles.completedAimText]} accessibilityLabel="Edit step name" />
                       <Text style={styles.characterFooter}>{value.length} / 100</Text>
                     </View>
-                    : <RenameLabel accessibilityLabel={`Rename aim: ${aim.text}`} accessibilityHint={group.aims.length > 1 ? 'Long press anywhere on this aim to reorder' : undefined} onPress={() => openAimEditor(aim.id, aim.text)} onPressIn={group.aims.length > 1 ? () => setAimPressHeld(true) : undefined} onLongPress={group.aims.length > 1 ? (event) => beginAimDrag(group, aim.id, event) : undefined} onPressMove={(event) => moveAimDrag(group, aim.id, event)} onPressOut={() => finishAimDrag(group, aim.id)} style={styles.rowTextWrap} pressStyle={styles.aimRenameTarget} pressedStyle={styles.renameTargetPressed}><Text selectable={false} style={[styles.aimText, aim.completed && styles.completedAimText]}>{aim.text}</Text></RenameLabel>}
+                    : <RenameLabel accessibilityLabel={`Rename step: ${aim.text}`} accessibilityHint={group.aims.length > 1 && !selectionMode ? 'Long press anywhere on this step to reorder' : undefined} disabled={selectionMode} onPress={() => openAimEditor(aim.id, aim.text)} onPressIn={group.aims.length > 1 && !selectionMode ? () => setAimPressHeld(true) : undefined} onLongPress={group.aims.length > 1 && !selectionMode ? (event) => beginAimDrag(group, aim.id, event) : undefined} onPressMove={(event) => moveAimDrag(group, aim.id, event)} onPressOut={() => finishAimDrag(group, aim.id)} style={styles.rowTextWrap} pressStyle={styles.aimRenameTarget} pressedStyle={styles.renameTargetPressed}><Text selectable={false} style={[styles.aimText, (activeAction === 'complete' ? completionInDraft(aim.id, aim.completed, activeCompletionDraft) : aim.completed) && styles.completedAimText]}>{aim.text}</Text></RenameLabel>}
                 </View>
                 {group.aims.length > 1 && focusedNoteId !== aim.id
                   ? aim.note
-                    ? <Pressable accessibilityRole="button" accessibilityLabel={`Edit note for ${aim.text}`} onPress={() => setFocusedNoteId(aim.id)} onLongPress={(event) => beginAimDrag(group, aim.id, event)} onPressMove={(event) => moveAimDrag(group, aim.id, event)} onPressOut={() => finishAimDrag(group, aim.id)} delayLongPress={450} pressRetentionOffset={AIM_DRAG_RETENTION} style={[selectionMode || showAimCompletion ? styles.noteWithSelection : styles.noteWithoutSelection, styles.noteInput]}><Text numberOfLines={3} style={styles.notePreviewText}>{aim.note}</Text></Pressable>
-                    : <Pressable accessibilityRole="button" accessibilityLabel={`Add note for ${aim.text}`} onPress={() => setFocusedNoteId(aim.id)} onLongPress={(event) => beginAimDrag(group, aim.id, event)} onPressMove={(event) => moveAimDrag(group, aim.id, event)} onPressOut={() => finishAimDrag(group, aim.id)} delayLongPress={450} pressRetentionOffset={AIM_DRAG_RETENTION} style={[styles.addNoteButton, selectionMode || showAimCompletion ? styles.noteWithSelection : styles.noteWithoutSelection]}><Feather name="plus" size={13} color={colors.textMuted} accessible={false} /><Text style={styles.addNoteText}>Add note</Text></Pressable>
-                  : noteInput(aim.id, aim.text, aim.note, false, showAimCompletion)}
+                    ? <Pressable accessibilityRole="button" accessibilityLabel={`Edit note for ${aim.text}`} accessibilityState={{ disabled: selectionMode }} disabled={selectionMode} onPress={() => setFocusedNoteId(aim.id)} onLongPress={(event) => beginAimDrag(group, aim.id, event)} onPressMove={(event) => moveAimDrag(group, aim.id, event)} onPressOut={() => finishAimDrag(group, aim.id)} delayLongPress={450} pressRetentionOffset={AIM_DRAG_RETENTION} style={[stepSelectionVisible ? styles.noteWithSelection : styles.noteWithoutSelection, styles.noteInput]}><Text numberOfLines={3} style={styles.notePreviewText}>{aim.note}</Text></Pressable>
+                    : textEditing || editingLocked ? null : <Pressable accessibilityRole="button" accessibilityLabel={`Add note for ${aim.text}`} onPress={() => setFocusedNoteId(aim.id)} onLongPress={(event) => beginAimDrag(group, aim.id, event)} onPressMove={(event) => moveAimDrag(group, aim.id, event)} onPressOut={() => finishAimDrag(group, aim.id)} delayLongPress={450} pressRetentionOffset={AIM_DRAG_RETENTION} style={[styles.addNoteButton, stepSelectionVisible ? styles.noteWithSelection : styles.noteWithoutSelection]}><Feather name="plus" size={13} color={colors.textMuted} accessible={false} /><Text style={styles.addNoteText}>Add note</Text></Pressable>
+                  : noteInput(aim.id, aim.text, aim.note, false, stepSelectionVisible)}
               </AimBlock>)}
+              </View>
               </View>}
-              {!collapsed && <PressFeedback label={`Add aim to ${group.title}`} onPress={() => openAddAim(group)} disabled={group.aims.length >= MAX_AIMS_PER_GROUP} style={[styles.boardButton, styles.addAimButton, group.aims.length > 0 && styles.compactAddAimButton]}>
-                <Feather name="plus" size={group.aims.length > 0 ? 20 : 17} color={effectiveTheme === 'light' ? colors.actionOnAccent : colors.accent} accessible={false} />
-                {group.aims.length === 0 && <Text style={styles.boardActionText}>Add aim</Text>}
-              </PressFeedback>}
+              {!collapsed && !newGoalEditing && !newStepEditing && !textEditing && !editingLocked && group.aims.length < MAX_AIMS_PER_GROUP &&
+                <PressFeedback label={`Add step to ${group.title}`} onPress={() => openAddAim(group)} style={[styles.boardButton, styles.addAimButton, group.aims.length > 0 && styles.compactAddAimButton, group.aims.length > 0 && stepSelectionVisible && styles.compactAddAimButtonWithSelection]}>
+                  <Feather name="plus" size={group.aims.length > 0 ? 20 : 17} color={colors.accent} accessible={false} />
+                  {group.aims.length === 0 && <Text style={styles.boardActionText}>Add step</Text>}
+                </PressFeedback>}
             </Animated.View>;
           })}
-          <PressFeedback label="Add group" onPress={openAddGroup} style={[styles.boardButton, styles.addGroupButton]}>
-            <Feather name="plus" size={17} color={effectiveTheme === 'light' ? colors.actionOnAccent : colors.accent} accessible={false} /><Text style={styles.boardActionText}>Add group</Text>
-          </PressFeedback>
+          <Animated.View style={{ transform: [{ translateX: goalLimitShake }] }}>
+            {!textEditing && !editingLocked && <PressFeedback label={groups.length >= MAX_GROUPS ? 'Goal list full; cannot add another goal' : 'Add goal'} onPress={openAddGroup} style={[styles.boardButton, styles.addGroupButton]}>
+              <Feather name="plus" size={17} color={goalLimitError ? colors.danger : colors.accent} accessible={false} /><Text style={[styles.boardActionText, goalLimitError && styles.goalLimitErrorText]}>Add goal</Text>
+            </PressFeedback>}
+            {groups.length >= MAX_GROUPS && <Text accessibilityLiveRegion="polite" style={[styles.fullGoalMessage, goalLimitError && styles.goalLimitErrorText]}>Looks like you&apos;re over-encumbered.</Text>}
+          </Animated.View>
         </View>
-        </RevealableToolbar>
+        </SelectableContent>
       </ScrollView>
-      {(groups.length > 0 || state.archive.length > 0) && <View style={styles.archiveFooter}>
-        <View style={[styles.footerActions, hasActiveSelection && styles.footerActionsSelected]}>
-        {hasActiveSelection && <PressFeedback label={`Delete ${selectedActive.size + selectedEmptyGroups.size} selected items`} onPress={deleteCurrentSelection} style={styles.deleteSelectedButton}>
-          <Feather name="trash-2" size={18} color={colors.dangerForeground} />
-        </PressFeedback>}
-        <PressFeedback label={hasActiveSelection ? `Archive ${selectedActive.size + selectedEmptyGroups.size} selected items` : 'Open Archive'} onPress={() => {
-            Keyboard.dismiss();
-            if (hasActiveSelection) archiveCurrentSelection();
-            else { setSelected(new Set()); setSelectedEmptyGroupIds(new Set()); setSelectionMode(false); setCompletionGroupId(null); cancelDrag(); setArchiveOpen(true); }
-          }} style={[styles.archiveTarget, (hasActiveSelection || hasArchivedItems) && styles.archiveTargetReady]}>
-          <Feather name="folder" size={22} color={hasActiveSelection || hasArchivedItems ? colors.archiveAccentForeground : colors.textMuted} />
-          <Text style={[styles.archiveTargetText, (hasActiveSelection || hasArchivedItems) && styles.archiveTargetTextReady]}>Archive{hasActiveSelection ? `  ·  ${selectedActive.size + selectedEmptyGroups.size}` : ''}</Text>
-        </PressFeedback>
-        {selectedEmptyGroups.size > 0 && selectedActive.size === 0 && <View style={styles.completeActionPlaceholder} />}
-        {selectedActive.size > 0 && <PressFeedback label={`Mark ${selectedActive.size} selected aims ${selectedActiveAllCompleted ? 'incomplete' : 'complete'}`} onPress={completeCurrentSelection} style={styles.completeSelectedButton}>
-          <Feather name="check" size={20} color={colors.sageForeground} />
-        </PressFeedback>}
-        </View>
-      </View>}
+      <OrganizerDock open={organizeOpen && groups.length > 0} canOpen={groups.length > 0} showLabel={showOrganizeHeader} enlargeWhenUnlabeled={largeUnlabeledOrganizerIcons.organize} onToggle={toggleOrganize} onClosed={finishActiveOrganizeClose} colors={colors} styles={styles}>
+        {activeAction
+          ? <ProcessActionButton action={activeAction} archived={false} showActionLabel={showOrganizerLabels[activeAction]} showLabels={showOrganizerProcessLabels} enlargeWhenUnlabeled={largeUnlabeledOrganizerIcons[activeAction]} count={activeAction === 'complete' ? activeCompletionChangeCount : activeAction === 'archive' ? selectedGoals.size + selectedEmptyGroups.size : selectedActive.size + selectedEmptyGroups.size + selectedGoals.size} disabled={activeAction === 'archive' ? !canArchiveSelection : activeAction === 'complete' ? activeCompletionChangeCount === 0 : selectedActive.size + selectedEmptyGroups.size + selectedGoals.size === 0} saveOnlyUncomplete={activeAction === 'complete' && activeNewCompletionCount === 0} onPress={() => { if (activeAction !== 'complete') setPendingConfirmation(activeAction); }} onSave={processActiveAction} onCancel={cancelActiveAction} colors={colors} styles={styles} />
+          : <OrganizeActions archived={false} onChoose={chooseActiveAction} showLabels={showOrganizerLabels} enlargeWhenUnlabeled={largeUnlabeledOrganizerIcons} disabled={textEditing} colors={colors} styles={styles} />}
+      </OrganizerDock>
     </>}
-    <Modal visible={editor?.kind === 'addAim' || editor?.kind === 'addGroup'} transparent animationType="fade" onRequestClose={closeEditor}>
-      <SafeAreaView edges={['bottom', 'left', 'right']} style={styles.modalBackdrop}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Cancel editing" onPress={closeEditor} style={StyleSheet.absoluteFill} />
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.eyebrow}>{editor?.kind === 'addAim' ? 'ADD AIM' : editor?.kind === 'addGroup' ? 'NEW GROUP' : editor?.kind === 'title' ? 'TITLE' : 'EDIT AIM'}</Text>
-            <Text style={styles.modalPrompt}>{editor?.kind === 'title' ? 'Rename this set' : editor?.kind === 'addGroup' ? 'Group name' : editor?.kind === 'addAim' ? 'Aim' : 'Rename this aim'}</Text>
-            <TextInput value={value} onChangeText={(next) => { setValue(next); setError(''); }} placeholder={editor?.kind === 'addAim' ? 'Write your aim...' : editor?.kind === 'addGroup' ? 'Name this group...' : undefined} placeholderTextColor={colors.textMuted} keyboardAppearance={effectiveTheme} maxLength={editor?.kind === 'title' || editor?.kind === 'addGroup' ? 40 : 100} returnKeyType={editor?.kind === 'addAim' ? 'next' : 'done'} enterKeyHint={editor?.kind === 'addAim' ? 'next' : 'done'} submitBehavior="blurAndSubmit" onSubmitEditing={() => { if (editor?.kind === 'addAim') newAimNoteInput.current?.focus(); else saveEditor(); }} style={styles.modalInput} accessibilityLabel={editor?.kind === 'title' || editor?.kind === 'addGroup' ? 'Group name' : 'Aim'} />
-            <Text style={styles.characterFooter}>{value.length} / {editor?.kind === 'title' || editor?.kind === 'addGroup' ? 40 : 100}</Text>
-            {editor?.kind === 'addAim' && <>
-              <Text style={styles.noteSectionLabel}>NOTE</Text>
-              <TextInput ref={newAimNoteInput} value={newAimNote} onChangeText={setNewAimNote} placeholder="Write a note..." placeholderTextColor={colors.textMuted} keyboardAppearance={effectiveTheme} multiline returnKeyType="done" enterKeyHint={Platform.OS === 'android' ? 'done' : undefined} submitBehavior={Platform.OS === 'android' ? 'blurAndSubmit' : 'newline'} onSubmitEditing={Platform.OS === 'android' ? saveEditor : undefined} maxLength={240} numberOfLines={3} textAlignVertical="top" style={styles.modalNoteInput} accessibilityLabel="Note for new aim" />
-              <Text style={styles.characterFooter}>{newAimNote.length} / 240</Text>
-            </>}
-            {!!error && <Text style={styles.errorText}>{error}</Text>}
-            <View style={styles.modalActions}>
-              <PressFeedback label="Cancel" onPress={closeEditor} style={styles.cancelButton}><Text style={styles.cancelText}>Cancel</Text></PressFeedback>
-              <PressFeedback label="Save" onPress={saveEditor} style={styles.saveButton}><Text style={styles.saveText}>Save</Text></PressFeedback>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    </Modal>
+    <ConfirmOrganizerAction action={pendingConfirmation} archived={archiveView} onCancel={() => setPendingConfirmation(null)} onConfirm={() => { setPendingConfirmation(null); if (archiveView) processArchiveAction(); else processActiveAction(); }} colors={colors} styles={styles} />
   </View>;
 }
 
-function createStyles(colors: ThemeColors, effectiveTheme: EffectiveTheme) {
+function createStyles(colors: ThemeColors) {
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: colors.background },
     scroll: { flex: 1, backgroundColor: colors.background },
@@ -808,24 +1019,22 @@ function createStyles(colors: ThemeColors, effectiveTheme: EffectiveTheme) {
     organizeScreenContent: { flexGrow: 1 },
     organizeListTouchArea: { flexGrow: 1 },
     listDivider: { borderBottomWidth: 1, borderBottomColor: colors.textMuted, opacity: 0.32, marginBottom: 10 },
-    organizeHeaderToggle: { position: 'absolute', right: 0, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-    organizeHeaderToggleInline: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-    organizeHeaderToggleCircle: { width: 34, height: 34, borderRadius: 17, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
-    organizeRevealContent: { overflow: 'hidden' },
-    selectionToolbarWrap: { minHeight: 60 },
-    selectionToolbar: { height: 60, paddingTop: 16, flexDirection: 'row', alignItems: 'center' },
-    toolbarActionRow: { width: '100%', maxWidth: 320, height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-    organizeControl: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-    organizeLabel: { position: 'absolute', top: -13, left: 4, width: 60, textAlign: 'left', fontFamily: fonts.sans.medium, fontSize: 10, lineHeight: 12, letterSpacing: 0.8, color: colors.textMuted },
-    selectionTogglePressed: { opacity: 0.75, transform: [{ scale: 0.94 }] },
-    selectionToggleDisabled: { opacity: 0.4 },
-    toolbarIconButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-    toolbarIconCircle: { width: 34, height: 34, borderRadius: 17, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
-    selectAllButton: { minHeight: 32, paddingHorizontal: 8, justifyContent: 'center', alignSelf: 'flex-end' },
-    selectAllText: { fontFamily: fonts.sans.medium, fontSize: 13, color: colors.accent },
-    group: { marginTop: 26, marginLeft: 6, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
+    selectCue: { width: 44, alignItems: 'center' },
+    activeSelectCue: { marginLeft: -2 },
+    archiveSelectCue: { marginLeft: -8 },
+    selectCueText: { fontFamily: fonts.sans.medium, fontSize: 10, lineHeight: 14, letterSpacing: 0.3, color: colors.accent },
+    organizeActions: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    organizeActionButton: { flex: 1, minHeight: 50, alignItems: 'center', justifyContent: 'center', gap: 2 },
+    organizeActionButtonWithoutLabel: { minHeight: 44 },
+    organizeActionHeading: { fontFamily: fonts.sans.medium, fontSize: 11, lineHeight: 15, color: colors.text, textAlign: 'center' },
+    organizeActionIcon: { width: 40, height: 34, alignItems: 'center', justifyContent: 'center' },
+    group: { marginTop: 26, marginLeft: 0, paddingLeft: 6, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: colors.line },
+    groupWithCompletionGutter: { paddingLeft: 50 },
     firstGroup: { marginTop: 3 },
     groupRow: { flexDirection: 'row', alignItems: 'center', marginLeft: -8 },
+    completedGoalIndicator: { position: 'absolute', left: -44, top: '50%', marginTop: -22, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+    goalNumberSlot: { width: 28, height: 44, alignItems: 'center', justifyContent: 'center' },
+    goalNumber: { fontFamily: fonts.sans.medium, fontSize: 14, color: colors.textMuted },
     draggedGroup: { zIndex: 10, elevation: 4, borderRadius: 12, backgroundColor: colors.surface, shadowColor: colors.shadow, shadowOpacity: 0.12, shadowRadius: 8 },
     groupDropTarget: { borderRadius: 12, backgroundColor: colors.surfaceMuted },
     rowWithoutSelection: { marginLeft: 0 },
@@ -833,11 +1042,7 @@ function createStyles(colors: ThemeColors, effectiveTheme: EffectiveTheme) {
     collapseButton: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
     collapseButtonPressed: { backgroundColor: colors.surfaceMuted, opacity: 0.85 },
     groupCompletedButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-    groupCompletedPressed: { opacity: 0.7, transform: [{ scale: 0.96 }] },
-    groupCompletedCircle: { width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
-    groupCompletionSquare: { width: 22, height: 22, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
-    groupCompletedCirclePending: { borderWidth: 1.5, borderColor: colors.text, backgroundColor: 'transparent' },
-    groupCompletedCircleDone: { borderWidth: 1.5, borderColor: colors.sage, backgroundColor: colors.sage },
+    cancelEditButtonPressed: { opacity: 0.6, transform: [{ scale: 0.92 }] },
     renameTarget: { minHeight: 44, borderRadius: 12, justifyContent: 'center', paddingHorizontal: 4 },
     aimRenameTarget: { minHeight: 44, maxWidth: '100%', alignSelf: 'flex-start', borderRadius: 12, justifyContent: 'center' },
     groupTitleEditTarget: { minHeight: 44, maxWidth: '100%', alignSelf: 'flex-start', borderRadius: 12, justifyContent: 'center' },
@@ -859,50 +1064,71 @@ function createStyles(colors: ThemeColors, effectiveTheme: EffectiveTheme) {
     draggedAim: { zIndex: 10, elevation: 4, borderRadius: 14, backgroundColor: colors.surface, shadowColor: colors.shadow, shadowOpacity: 0.12, shadowRadius: 8 },
     draggedAimBorder: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, borderRadius: 14, borderWidth: 1, borderColor: colors.accent },
     aimRow: { flexDirection: 'row', alignItems: 'center', marginLeft: -8 },
-    aimNumber: { width: 24, fontFamily: fonts.sans.medium, fontSize: 13, lineHeight: 20, color: colors.textMuted },
+    aimNumber: { width: 36, fontFamily: fonts.sans.medium, fontSize: 13, lineHeight: 20, color: colors.textMuted },
+    aimNumberCancelButton: { width: 36, height: 44, alignItems: 'flex-start', justifyContent: 'center' },
     aimText: { fontFamily: fonts.sans.medium, fontSize: 15, lineHeight: 22, color: colors.text, flexShrink: 1 },
     inlineAimInput: { flex: 1, minHeight: 44, padding: 0, includeFontPadding: false },
     completedAimText: { color: colors.textMuted, textDecorationLine: 'line-through', textDecorationColor: colors.textMuted },
-    noteInput: { fontFamily: fonts.sans.regular, fontSize: 13, lineHeight: 20, color: colors.textMuted, minHeight: 35, maxHeight: 82, paddingTop: 3, paddingBottom: 8, paddingHorizontal: 3, marginRight: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
+    noteEditWrap: { position: 'relative' },
+    noteReadOnly: { minHeight: 35, maxHeight: 82, paddingTop: 3, paddingBottom: 8, paddingLeft: 3, marginRight: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
+    noteInput: { fontFamily: fonts.sans.regular, fontSize: 13, lineHeight: 20, color: colors.textMuted, minHeight: 35, maxHeight: 82, paddingTop: 3, paddingBottom: 8, paddingLeft: 3, paddingRight: 38, marginRight: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
+    noteCancelButton: { position: 'absolute', top: '50%', right: 0, width: 36, height: 44, marginTop: -22, alignItems: 'center', justifyContent: 'center' },
     notePreviewText: { fontFamily: fonts.sans.regular, fontSize: 13, lineHeight: 20, color: colors.textMuted },
-    noteWithSelection: { marginLeft: 64 },
+    noteWithSelection: { marginLeft: 76 },
     noteWithoutSelection: { marginLeft: 28 },
     addNoteButton: { minHeight: 30, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 4, opacity: 0.78 },
     addNoteText: { fontFamily: fonts.sans.regular, fontSize: 12, color: colors.textMuted },
-    boardButton: { minWidth: 160, minHeight: 54, borderWidth: 1, borderColor: effectiveTheme === 'light' ? colors.actionAccent : colors.accent, borderRadius: 16, backgroundColor: effectiveTheme === 'light' ? colors.actionAccent : colors.surface, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+    boardButton: { minHeight: 44, paddingHorizontal: 4, flexDirection: 'row', alignItems: 'center', gap: 8 },
     addAimButton: { marginLeft: 45, marginTop: 9, alignSelf: 'flex-start' },
-    compactAddAimButton: { minWidth: 54, width: 54, paddingHorizontal: 0 },
+    compactAddAimButton: { width: 44, marginLeft: 2, justifyContent: 'center', paddingHorizontal: 0 },
+    compactAddAimButtonWithSelection: { marginLeft: 46 },
     addGroupButton: { marginTop: 20, alignSelf: 'flex-start' },
-    boardActionText: { fontFamily: fonts.sans.medium, fontSize: 14, color: effectiveTheme === 'light' ? colors.actionOnAccent : colors.accent },
-    archiveFooter: { backgroundColor: colors.background, borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 24, paddingVertical: 9, alignItems: 'center' },
-    footerActions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 16 },
-    footerActionsSelected: { width: '100%', justifyContent: 'space-between' },
-    archiveTarget: { minWidth: 150, minHeight: 48, borderRadius: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface },
-    archiveTargetReady: { borderColor: colors.archiveAccent, backgroundColor: colors.archiveAccent },
-    deleteSelectedButton: { width: 48, height: 48, borderRadius: 16, borderWidth: 1, borderColor: colors.danger, backgroundColor: colors.danger, opacity: 1, alignItems: 'center', justifyContent: 'center' },
-    completeSelectedButton: { width: 48, height: 48, borderRadius: 16, borderWidth: 1, borderColor: colors.sage, backgroundColor: colors.sage, opacity: 1, alignItems: 'center', justifyContent: 'center' },
-    completeActionPlaceholder: { width: 48, height: 48 },
-    archiveTargetText: { fontFamily: fonts.sans.medium, fontSize: 13, color: colors.textMuted },
-    archiveTargetTextReady: { color: colors.archiveAccentForeground },
+    boardActionText: { fontFamily: fonts.sans.medium, fontSize: 14, color: colors.accent },
+    fullGoalMessage: { marginTop: 12, marginLeft: 4, fontFamily: fonts.sans.medium, fontSize: 12, lineHeight: 18, color: colors.textMuted },
+    goalLimitErrorText: { color: colors.danger },
+    organizerDock: { position: 'absolute', left: 0, right: 0, bottom: 0, overflow: 'hidden' },
+    organizerDockMotion: { width: '100%' },
+    organizerDockPanel: { height: ORGANIZER_MENU_HEIGHT, backgroundColor: colors.background, paddingHorizontal: 24, paddingVertical: 6, alignItems: 'center', justifyContent: 'center' },
+    organizerToggleFooter: { alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background, borderTopWidth: 1, borderTopColor: colors.line },
+    organizerToggleButton: { minWidth: 72, minHeight: 44, alignItems: 'center', justifyContent: 'center', gap: 2 },
+    organizerToggleLabel: { fontFamily: fonts.sans.medium, fontSize: 10, lineHeight: 14, color: colors.textMuted },
+    organizerToggleIcon: { width: 44, height: 34, alignItems: 'center', justifyContent: 'center' },
+    organizerToggleDisabled: { opacity: 0.4 },
+    organizerTogglePressed: { opacity: 0.75, transform: [{ scale: 0.94 }] },
+    processActionRow: { width: '100%', minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+    cancelProcessButton: { position: 'absolute', left: 0, minWidth: 58, height: 58, alignItems: 'center', justifyContent: 'center', gap: 2 },
+    processActionTitle: { flex: 1, fontFamily: fonts.sans.medium, fontSize: 14, textAlign: 'center', marginHorizontal: 64 },
+    processTarget: { width: 58, height: 58, alignItems: 'center', justifyContent: 'center' },
+    processActionLabel: { fontFamily: fonts.sans.medium, fontSize: 10, lineHeight: 14, color: colors.danger },
+    saveProcessButton: { position: 'absolute', right: 0, minWidth: 58, height: 58, alignItems: 'center', justifyContent: 'center', gap: 2 },
+    confirmOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, backgroundColor: colors.backdrop },
+    confirmCard: { width: '100%', maxWidth: 340, borderRadius: 20, padding: 22, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line },
+    confirmTitle: { fontFamily: fonts.serif.regular, fontSize: 22, lineHeight: 29, color: colors.text },
+    confirmCopy: { marginTop: 6, fontFamily: fonts.sans.regular, fontSize: 13, color: colors.textMuted },
+    confirmActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 18, marginTop: 20 },
+    confirmButton: { minWidth: 64, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+    confirmCancelText: { fontFamily: fonts.sans.medium, fontSize: 14, color: colors.textMuted },
+    confirmActionText: { fontFamily: fonts.sans.semibold, fontSize: 14 },
     archiveContent: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 10, paddingBottom: 30, backgroundColor: colors.background },
     backButton: { width: 44, height: 44, justifyContent: 'center' },
-    archiveTitle: { fontFamily: fonts.serif.regular, fontSize: 38, lineHeight: 47, color: colors.text, marginTop: 14 },
+    archiveTopRow: { minHeight: 54, flexDirection: 'row', alignItems: 'center' },
+    archiveTitleSlot: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+    archiveTopSpacer: { width: 44, height: 44 },
+    archiveTitleEditTarget: { maxWidth: '100%', alignSelf: 'center', paddingHorizontal: 2, borderRadius: 10 },
+    archiveTitle: { fontFamily: fonts.serif.regular, fontSize: 30, lineHeight: 40, color: colors.text, textAlign: 'center' },
+    archiveTitleEditWrap: { width: '100%' },
+    archiveTitleInput: { minHeight: 44, padding: 0, fontFamily: fonts.serif.regular, fontSize: 30, lineHeight: 40, color: colors.text, textAlign: 'center' },
+    archiveTitleCharacterFooter: { alignSelf: 'flex-end', marginTop: 2, fontFamily: fonts.sans.medium, fontSize: 10, color: colors.textMuted },
     archiveDateBlock: { marginTop: 32 },
+    archiveDateBlockWithoutHeading: { marginTop: 16 },
     eyebrow: { fontFamily: fonts.sans.medium, fontSize: 11, letterSpacing: 2, color: colors.accent },
-    archiveGroup: { marginTop: 20, marginLeft: 6 },
+    archiveHeadingSection: { marginTop: 14 },
+    archiveHeadingRow: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6, borderBottomWidth: 1, borderBottomColor: colors.line, borderRadius: 10 },
+    archiveHeadingTitleTarget: { flex: 1, minHeight: 44, justifyContent: 'center', borderRadius: 10 },
+    archiveHeadingTitle: { fontFamily: fonts.serif.regular, fontSize: 21, lineHeight: 29, color: colors.text },
+    archiveHeadingCollapseButton: { width: 32, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
+    archiveGroup: { marginTop: 16, marginLeft: 0, paddingLeft: 16 },
+    archiveGroupWithCompletionGutter: { paddingLeft: 60 },
     archiveAim: { marginTop: 10, paddingLeft: 14 },
-    modalBackdrop: { flex: 1, justifyContent: 'flex-end', padding: 16, backgroundColor: colors.backdrop },
-    modalCard: { borderRadius: 29, padding: 24, paddingTop: 14, backgroundColor: colors.surface },
-    modalHandle: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center', backgroundColor: colors.line, marginBottom: 22 },
-    modalPrompt: { fontFamily: fonts.serif.regular, fontSize: 26, lineHeight: 34, color: colors.text, marginTop: 8 },
-    modalInput: { minHeight: 54, marginTop: 17, borderRadius: 17, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.inputBackground, paddingHorizontal: 16, fontFamily: fonts.sans.medium, fontSize: 15, color: colors.text },
-    noteSectionLabel: { fontFamily: fonts.sans.medium, fontSize: 11, letterSpacing: 2, color: colors.textMuted, marginTop: 18, marginBottom: 8 },
-    modalNoteInput: { minHeight: 82, maxHeight: 110, borderRadius: 17, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.inputBackground, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10, fontFamily: fonts.sans.regular, fontSize: 14, lineHeight: 20, color: colors.text },
-    errorText: { fontFamily: fonts.sans.regular, fontSize: 12, color: colors.accent, marginTop: 9 },
-    modalActions: { flexDirection: 'row', gap: 10, marginTop: 23 },
-    cancelButton: { flex: 1, minHeight: 50, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.control },
-    cancelText: { fontFamily: fonts.sans.medium, fontSize: 14, color: colors.text },
-    saveButton: { flex: 1, minHeight: 50, borderRadius: 16, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },
-    saveText: { fontFamily: fonts.sans.semibold, fontSize: 14, color: colors.accentForeground },
   });
 }

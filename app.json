@@ -1,22 +1,25 @@
 {
   "expo": {
-    "name": "mobileDev",
-    "slug": "mobileDev",
+    "name": "Studious",
+    "slug": "studious",
+    "owner": "hvzetrp",
     "version": "0.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "backgroundColor": "#F3EBDD",
     "ios": {
+      "bundleIdentifier": "com.mobiledev.studious.preview",
       "supportsTablet": true
     },
     "android": {
+      "package": "com.mobiledev.studious.preview",
       "softwareKeyboardLayoutMode": "pan",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
+        "foregroundImage": "./assets/android-icon-foreground-safe.png",
         "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "monochromeImage": "./assets/android-icon-monochrome-safe.png"
       },
       "predictiveBackGestureEnabled": false
     },
@@ -38,6 +41,11 @@
           "resizeMode": "contain"
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "ed284cd4-2b99-4934-9747-c7068df950a7"
+      }
+    }
   }
 }

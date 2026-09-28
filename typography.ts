@@ -1,6 +1,6 @@
 export const fonts = {
   serif: {
-    regular: 'DMSerifDisplay-Regular',
+    regular: 'SourceSerif4-Regular',
   },
   sans: {
     regular: 'Inter-Regular',

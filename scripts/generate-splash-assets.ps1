@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$fontPath = Join-Path $projectRoot 'assets\fonts\DMSerifDisplay-Regular.ttf'
+$fontPath = Join-Path $projectRoot 'assets\fonts\SourceSerif4-Variable.ttf'
 $outputDirectory = Join-Path $projectRoot 'assets\splash'
 $wordmark = 'Studious'
 
@@ -16,8 +16,8 @@ New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 $fontCollection = [System.Drawing.Text.PrivateFontCollection]::new()
 $fontCollection.AddFontFile($fontPath)
 $fontFamily = $fontCollection.Families[0]
-if ($fontFamily.Name -ne 'DM Serif Display') {
-  throw "Expected DM Serif Display, found $($fontFamily.Name)"
+if ($fontFamily.Name -ne 'Source Serif 4') {
+  throw "Expected Source Serif 4, found $($fontFamily.Name)"
 }
 
 $font = [System.Drawing.Font]::new($fontFamily, 150, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
